@@ -25,8 +25,8 @@ type Screen = "select-experience" | "role" | "session";
 type Role = "teacher" | "student";
 type ChromaSettingKey = keyof ChromaKeySettings;
 const SESSION_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const CHROMA_SETTINGS_STORAGE_KEY = "ios-cessna-demo:chroma-key-settings:v1";
-const APP_TITLE = "IOS Cessna Demo";
+const CHROMA_SETTINGS_STORAGE_KEY = "iol-cessna-demo:chroma-key-settings:v1";
+const APP_TITLE = "IOL Cessna Demo";
 const APP_TAGLINE = "Single-experience WebXR classroom";
 
 interface PersistentChromaMemory {

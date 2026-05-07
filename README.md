@@ -1,4 +1,4 @@
-# IOS_Cessna_Demo
+# IOL_Cessna_Demo
 
 Single-experience WebXR classroom demo for inspecting a Cessna in AR, VR, and fallback mode with shared object controls and a chroma-keyed Cessna video.
 
@@ -39,9 +39,9 @@ Open the Vite HTTPS URL from the terminal output. Quest Browser requires HTTPS f
 
 Project assets are wired to:
 
-- `public/assets/experiences/ios-cessna-demo/models/cessna.glb`
-- `public/assets/experiences/ios-cessna-demo/environments/hangar.glb`
-- `public/assets/experiences/ios-cessna-demo/videos/cessna.mp4`
+- `public/assets/experiences/iol-cessna-demo/models/cessna.glb`
+- `public/assets/experiences/iol-cessna-demo/environments/hangar.glb`
+- `public/assets/experiences/iol-cessna-demo/videos/cessna.mp4`
 - `public/assets/chroma/cessna-green-screen.mp4`
 
 Optional UI button artwork can live in `public/assets/ui-buttons/`. The current MVP uses CSS buttons so the app remains usable before final art is copied in.
