@@ -1,5 +1,6 @@
 export type ExperienceMode = "ar" | "vr" | "fallback";
 export type TabletControlMode = "inspect" | "explore";
+export type ExperienceVideoActivationMode = "standard" | "teacher" | "student";
 
 export type Vector3Tuple = [number, number, number];
 
@@ -23,6 +24,7 @@ export interface ExperienceEnvironmentConfig {
   position?: Vector3Tuple;
   rotation?: Vector3Tuple;
   fitToSize?: number;
+  brightness?: number;
 }
 
 export interface ExperiencePartConfig {
@@ -31,6 +33,7 @@ export interface ExperiencePartConfig {
   markerPosition: Vector3Tuple;
   explanation: string;
   videoUrl?: string;
+  videoActivationMode?: ExperienceVideoActivationMode;
 }
 
 export interface ExperienceConfig {

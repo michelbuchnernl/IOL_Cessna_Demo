@@ -1,9 +1,22 @@
 export type Role = "teacher" | "student";
 export type Vector3Tuple = [number, number, number];
+export type QuaternionTuple = [number, number, number, number];
 export type ChromaPlaybackMode = "loop" | "once";
 export type SceneObjectId = "model" | "chroma";
 export type ObjectMarkerState = "green" | "orange" | "red";
 export type ObjectMarkerStates = Record<SceneObjectId, ObjectMarkerState>;
+
+export interface PresenceJoint {
+  position: Vector3Tuple;
+  quaternion: QuaternionTuple;
+}
+
+export interface ParticipantPresence {
+  head: PresenceJoint;
+  leftHand: PresenceJoint | null;
+  rightHand: PresenceJoint | null;
+  inVr: boolean;
+}
 
 export interface ChromaKeySettings {
   similarity: number;
@@ -134,6 +147,7 @@ export interface Participant {
   role: Role;
   calibrated: boolean;
   connectedAt: number;
+  presence: ParticipantPresence | null;
 }
 
 export type ClientMessage =
@@ -152,6 +166,10 @@ export type ClientMessage =
   | {
       type: "calibrate";
       origin: number[];
+    }
+  | {
+      type: "set-participant-presence";
+      presence: ParticipantPresence;
     }
   | {
       type: "teacher-command";
@@ -218,6 +236,11 @@ export type ServerMessage =
       command: ClientCommand;
     }
   | {
+      type: "participant-presence";
+      participantId: string;
+      presence: ParticipantPresence | null;
+    }
+  | {
       type: "error";
       message: string;
     };
@@ -237,6 +260,44 @@ function normalizeVector3Tuple(value: unknown): Vector3Tuple | null {
     value.every((item) => typeof item === "number" && Number.isFinite(item))
     ? value as Vector3Tuple
     : null;
+}
+
+function normalizeQuaternionTuple(value: unknown): QuaternionTuple | null {
+  return Array.isArray(value) &&
+    value.length === 4 &&
+    value.every((item) => typeof item === "number" && Number.isFinite(item))
+    ? value as QuaternionTuple
+    : null;
+}
+
+export function normalizePresenceJoint(value: unknown): PresenceJoint | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const record = value as Partial<Record<keyof PresenceJoint, unknown>>;
+  const position = normalizeVector3Tuple(record.position);
+  const quaternion = normalizeQuaternionTuple(record.quaternion);
+  return position && quaternion ? { position, quaternion } : null;
+}
+
+export function normalizeParticipantPresence(value: unknown): ParticipantPresence | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const record = value as Partial<Record<keyof ParticipantPresence, unknown>>;
+  const head = normalizePresenceJoint(record.head);
+  if (!head) {
+    return null;
+  }
+
+  return {
+    head,
+    leftHand: normalizePresenceJoint(record.leftHand),
+    rightHand: normalizePresenceJoint(record.rightHand),
+    inVr: typeof record.inVr === "boolean" ? record.inVr : false
+  };
 }
 
 function normalizePlaybackRevision(value: unknown): number {

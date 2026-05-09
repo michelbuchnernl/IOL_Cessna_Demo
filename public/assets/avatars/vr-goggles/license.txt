@@ -1,0 +1,11 @@
+Model Information:
+* title:	VR_HMD
+* source:	https://sketchfab.com/3d-models/vr-hmd-d2d484535e41402c8213a7d0d7e30267
+* author:	yuuuusukeeee (https://sketchfab.com/yuuuusukeeee)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "VR_HMD" (https://sketchfab.com/3d-models/vr-hmd-d2d484535e41402c8213a7d0d7e30267) by yuuuusukeeee (https://sketchfab.com/yuuuusukeeee) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

@@ -2,23 +2,48 @@ import type { ExperienceConfig } from "../types/experience";
 
 export const cessnaExperience: ExperienceConfig = {
   id: "iol-cessna-demo",
-  title: "IOL Cessna Demo",
-  description: "Inspect a Cessna model in AR, VR, or fallback mode with the hangar environment and a keyed Cessna video.",
+  title: "IOL Hangar Demo",
+  description: "Explore the complete hangar scene with a turbofan teaching prop and teacher- or student-triggered video activators.",
   modes: ["ar", "vr", "fallback"],
   tabletControlMode: "inspect",
   model: {
-    url: "/assets/experiences/iol-cessna-demo/models/cessna.glb",
+    url: "/assets/experiences/iol-cessna-demo/models/turbofan.glb",
     scale: 1,
-    position: [0, 0, -1.5],
-    rotation: [0, Math.PI, 0],
-    fitToDisplaySize: 2.8
+    position: [-8, 0, -7],
+    rotation: [0, Math.PI / 2, 0]
   },
   environment: {
-    vrGarageUrl: "/assets/experiences/iol-cessna-demo/environments/hangar.glb"
+    vrGarageUrl: "/assets/experiences/iol-cessna-demo/environments/hangar.glb",
+    brightness: 0.5
   },
-  parts: [],
+  parts: [
+    {
+      id: "student-cessna-video",
+      label: "Cessna Video",
+      markerPosition: [6.5, 1.4, -4.5],
+      explanation: "Student-activated Cessna video. Selecting the blue sphere plays the clip from beginning to end.",
+      videoUrl: "/assets/experiences/iol-cessna-demo/videos/cessna.mp4",
+      videoActivationMode: "student"
+    },
+    {
+      id: "student-turbofan-video",
+      label: "Turbofan Video",
+      markerPosition: [-6.2, 1.35, -5.2],
+      explanation: "Student-activated turbofan video. Selecting the blue sphere plays the clip from beginning to end.",
+      videoUrl: "/assets/experiences/iol-cessna-demo/videos/turbine.mp4",
+      videoActivationMode: "student"
+    },
+    {
+      id: "teacher-boeing-video",
+      label: "Boeing Video",
+      markerPosition: [0, 1.8, -10],
+      explanation: "Teacher-controlled Boeing video for whole-class explanation.",
+      videoUrl: "/assets/experiences/iol-cessna-demo/videos/boeing.mp4",
+      videoActivationMode: "teacher"
+    }
+  ],
   introVideos: {
-    default: "/assets/experiences/iol-cessna-demo/videos/cessna.mp4"
+    default: "/assets/experiences/iol-cessna-demo/videos/boeing.mp4"
   },
   assessmentUrl: "https://forms.office.com/"
 };

@@ -6,11 +6,13 @@ import {
   normalizeChromaBillboardState,
   normalizeObjectMarkerState,
   normalizeObjectMarkerStates,
+  normalizeParticipantPresence,
   type ChromaBillboardState,
   type ClientCommand,
   type ClientMessage,
   type ObjectMarkerStates,
   type Participant,
+  type ParticipantPresence,
   type Role,
   type SceneObjectId,
   type ServerMessage,
@@ -199,6 +201,17 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
     return;
   }
 
+  if (message.type === "set-participant-presence") {
+    client.participant.presence = normalizeParticipantPresence(message.presence);
+    session.participants.set(client.participant.id, client.participant);
+    broadcast(session, {
+      type: "participant-presence",
+      participantId: client.participant.id,
+      presence: client.participant.presence
+    });
+    return;
+  }
+
   if (message.type === "teacher-command") {
     if (client.participant.role !== "teacher") {
       send(socket, { type: "error", message: "Only the teacher can control the shared session." });
@@ -283,7 +296,8 @@ function createParticipant(name: string, role: "teacher" | "student"): Participa
     name: sanitizedName || (role === "teacher" ? "Teacher" : "Student"),
     role,
     calibrated: false,
-    connectedAt: Date.now()
+    connectedAt: Date.now(),
+    presence: null
   };
 }
 
@@ -368,6 +382,16 @@ function parseClientMessage(data: RawData): ClientMessage | undefined {
   if (parsed.type === "teacher-command") {
     return validCommands.has(parsed.command as ClientCommand)
       ? { type: "teacher-command", command: parsed.command as ClientCommand }
+      : undefined;
+  }
+
+  if (parsed.type === "set-participant-presence") {
+    const presence = normalizeParticipantPresence(parsed.presence);
+    return presence
+      ? {
+          type: "set-participant-presence",
+          presence
+        }
       : undefined;
   }
 

@@ -19,7 +19,7 @@ import {
 import { ClassroomSocket, type ClassroomSocketState } from "../net/ClassroomSocket";
 import { detectXrCapabilities, getBestMode, type XrCapabilities } from "../scene/capabilities";
 import { ExperienceScene } from "../scene/ExperienceScene";
-import type { ExperienceConfig, ExperienceMode, ExperiencePartConfig, TabletControlMode } from "../types/experience";
+import type { ExperienceConfig, ExperienceMode, ExperiencePartConfig, ExperienceVideoActivationMode, TabletControlMode } from "../types/experience";
 
 type Screen = "select-experience" | "role" | "session";
 type Role = "teacher" | "student";
@@ -103,6 +103,10 @@ export class ClassroomApp {
     });
     this.socket.addEventListener("teacher-command", (event) => {
       this.applyTeacherCommand((event as CustomEvent<ClientCommand>).detail);
+    });
+    this.socket.addEventListener("participant-presence", (event) => {
+      const detail = (event as CustomEvent<{ participants: ClassroomSocketState["participants"] }>).detail;
+      this.scene?.setParticipants(detail.participants, this.state.socket.participantId);
     });
     this.render();
   }
@@ -453,12 +457,22 @@ export class ClassroomApp {
       return "";
     }
 
+    const videoActivationMode = this.getPartVideoActivationMode(part);
+    const autoPlay = videoActivationMode === "student" || videoActivationMode === "teacher";
+    const controls = videoActivationMode === "standard";
+    const activationText = videoActivationMode === "student"
+      ? "Student-activated video"
+      : videoActivationMode === "teacher"
+        ? "Teacher-controlled video"
+        : "";
+
     return `
       <aside class="part-panel">
         <button class="close-button" data-action="close-part">×</button>
         <h2>${part.label}</h2>
         <p>${part.explanation}</p>
-        ${part.videoUrl ? `<video controls playsinline preload="auto" src="${part.videoUrl}"></video>` : ""}
+        ${activationText ? `<p>${activationText}</p>` : ""}
+        ${part.videoUrl ? `<video ${controls ? "controls" : ""} ${autoPlay ? 'data-auto-play="true"' : ""} playsinline preload="auto" src="${part.videoUrl}"></video>` : ""}
       </aside>
     `;
   }
@@ -622,6 +636,18 @@ export class ClassroomApp {
     this.root.querySelectorAll<HTMLSelectElement>('select[data-action="chroma-playback"]').forEach((select) => {
       select.addEventListener("change", () => this.handleChromaPlaybackInput(select));
     });
+
+    const selectedVideo = this.root.querySelector<HTMLVideoElement>('.part-panel video[data-auto-play="true"]');
+    if (selectedVideo && this.state.selectedPart?.videoUrl) {
+      selectedVideo.currentTime = 0;
+      void selectedVideo.play().catch(() => undefined);
+      if (this.getPartVideoActivationMode(this.state.selectedPart) === "student") {
+        selectedVideo.addEventListener("ended", () => {
+          this.state.selectedPart = undefined;
+          this.render();
+        }, { once: true });
+      }
+    }
   }
 
   private handleAction(action: string): void {
@@ -680,6 +706,7 @@ export class ClassroomApp {
     }
 
     if (action === "monitor-vr") {
+      this.scene?.suppressPointerSelection();
       if (this.state.selectedExperience) {
         this.loadSelectedExperience("vr", false);
       }
@@ -815,6 +842,11 @@ export class ClassroomApp {
             this.socket.setObjectMarkerState(objectId, state);
           }
         },
+        onParticipantPresenceChange: (presence) => {
+          if (this.state.socket.code) {
+            this.socket.setParticipantPresence(presence);
+          }
+        },
         onCalibrate: (origin) => {
           this.state.localCalibrated = true;
           this.socket.calibrate(origin);
@@ -826,10 +858,13 @@ export class ClassroomApp {
         }
       });
       this.scene.setRole(this.state.role);
+      this.scene.setLocalParticipantId(this.state.socket.participantId);
     } else if (!container.contains(this.scene.domElement)) {
       container.append(this.scene.domElement);
     }
     this.scene.refreshViewport();
+    this.scene.setLocalParticipantId(this.state.socket.participantId);
+    this.scene.setParticipants(this.state.socket.participants, this.state.socket.participantId);
 
   }
 
@@ -846,6 +881,8 @@ export class ClassroomApp {
   }
 
   private applySharedState(): void {
+    this.scene?.setLocalParticipantId(this.state.socket.participantId);
+    this.scene?.setParticipants(this.state.socket.participants, this.state.socket.participantId);
     this.scene?.setAnimationStep(this.state.socket.animationStep);
     this.scene?.setObjectScale(this.state.socket.objectScale);
     if (this.state.socket.modelPosition) {
@@ -1067,6 +1104,10 @@ export class ClassroomApp {
     this.state.chromaPlaybackMode = chromaState.playbackMode;
     this.state.chromaPlaybackRevision = chromaState.playbackRevision;
     this.saveChromaMemory();
+  }
+
+  private getPartVideoActivationMode(part: ExperiencePartConfig): ExperienceVideoActivationMode {
+    return part.videoActivationMode ?? "standard";
   }
 
   private saveChromaMemory(): void {

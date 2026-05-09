@@ -4,12 +4,14 @@ import {
   normalizeChromaBillboardState,
   normalizeObjectMarkerState,
   normalizeObjectMarkerStates,
+  normalizeParticipantPresence,
   type ChromaBillboardState,
   type ClientCommand,
   type ClientMessage,
   type ObjectMarkerState,
   type ObjectMarkerStates,
   type Participant,
+  type ParticipantPresence,
   type Role,
   type SceneObjectId,
   type ServerMessage,
@@ -107,6 +109,14 @@ export class ClassroomSocket extends EventTarget {
     this.send({ type: "set-teleport-enabled", enabled });
   }
 
+  setParticipantPresence(presence: ParticipantPresence): void {
+    const normalized = normalizeParticipantPresence(presence);
+    if (!normalized) {
+      return;
+    }
+    this.send({ type: "set-participant-presence", presence: normalized });
+  }
+
   disconnect(): void {
     this.socket?.close();
     this.socket = undefined;
@@ -193,6 +203,26 @@ export class ClassroomSocket extends EventTarget {
         error: undefined
       };
       this.emitChange();
+      return;
+    }
+
+    if (message.type === "participant-presence") {
+      const nextParticipants = this.state.participants.map((participant) =>
+        participant.id === message.participantId
+          ? { ...participant, presence: normalizeParticipantPresence(message.presence) }
+          : participant
+      );
+      this.state = {
+        ...this.state,
+        participants: nextParticipants
+      };
+      this.dispatchEvent(new CustomEvent("participant-presence", {
+        detail: {
+          participantId: message.participantId,
+          presence: normalizeParticipantPresence(message.presence),
+          participants: structuredClone(nextParticipants)
+        }
+      }));
       return;
     }
 
