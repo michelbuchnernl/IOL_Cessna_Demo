@@ -46,6 +46,7 @@ interface SceneOptions {
   onScaleStep: (direction: -1 | 1) => void;
   onObjectScaleChange: (scale: number) => void;
   onModelPositionChange: (position: Vector3Tuple) => void;
+  onPartMarkerPositionChange: (partId: string, position: Vector3Tuple) => void;
   onChromaTransformChange: (position: Vector3Tuple, scale: number) => void;
   onChromaBillboardStateChange: (state: ChromaBillboardState) => void;
   onObjectMarkerStateChange: (objectId: SceneObjectId, state: ObjectMarkerState) => void;
@@ -348,6 +349,12 @@ export class ExperienceScene {
   private lastScaleSync = 0;
   private lastPositionSync = 0;
   private lastChromaTransformSync = 0;
+  private readonly markersByPartId = new Map<string, THREE.Mesh>();
+  private desktopGrabMarkerPartId?: string;
+  private grabbedMarkerController?: THREE.Object3D;
+  private grabbedMarkerPartId?: string;
+  private grabbedMarkerDistance = 1.6;
+  private lastMarkerPositionSync = 0;
   private frameDelta = 0.016;
   private loadVersion = 0;
   private rightBWasPressed = false;
@@ -380,6 +387,8 @@ export class ExperienceScene {
 
     this.camera.position.set(0, 1.55, 2.2);
     this.camera.rotation.order = "YXZ";
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 0.16;
     this.renderer.xr.enabled = true;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     options.container.append(this.renderer.domElement);
@@ -389,8 +398,8 @@ export class ExperienceScene {
     this.debugTexture = new THREE.CanvasTexture(this.debugCanvas);
     this.xrDebugPanel = this.createDebugPanel();
 
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x4c5a6a, 1.7));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2);
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x4c5a6a, 0.15));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 0.15);
     keyLight.position.set(3, 5, 2);
     this.scene.add(keyLight);
     this.scene.add(this.classroomRoot);
@@ -410,9 +419,6 @@ export class ExperienceScene {
     this.updateTeleportDebugPanel();
     void this.loadParticipantHeadsetTemplate();
 
-    const grid = new THREE.GridHelper(8, 16, 0x4da3ff, 0x2d3748);
-    grid.position.y = -0.01;
-    this.scene.add(grid);
 
     const controllerOne = this.renderer.xr.getController(0);
     const controllerTwo = this.renderer.xr.getController(1);
@@ -672,6 +678,15 @@ export class ExperienceScene {
   setObjectMarkerStates(states: ObjectMarkerStates): void {
     this.objectMarkerStates = normalizeObjectMarkerStates(states);
     this.applyObjectMarkerStates();
+  }
+
+  setPartMarkerPositions(positions: Record<string, Vector3Tuple>): void {
+    for (const [partId, position] of Object.entries(positions)) {
+      const marker = this.markersByPartId.get(partId);
+      if (marker) {
+        marker.position.fromArray(position);
+      }
+    }
   }
 
   setObjectMarkerState(objectId: SceneObjectId, state: ObjectMarkerState): void {
@@ -1510,6 +1525,7 @@ export class ExperienceScene {
       marker.visible = false;
       this.classroomRoot.add(marker);
       this.markers.set(marker, part);
+      this.markersByPartId.set(part.id, marker);
     }
     this.updatePartMarkerVisibility();
   }
@@ -1998,23 +2014,6 @@ export class ExperienceScene {
       if ((light as THREE.Object3D).isObject3D && "intensity" in light && typeof light.intensity === "number") {
         light.intensity *= brightness;
       }
-
-      const mesh = object as THREE.Mesh;
-      if (!mesh.isMesh || !mesh.material) {
-        return;
-      }
-
-      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      materials.forEach((material) => {
-        if (!("color" in material) || !(material.color instanceof THREE.Color)) {
-          return;
-        }
-
-        material.color.multiplyScalar(brightness);
-        if ("emissive" in material && material.emissive instanceof THREE.Color) {
-          material.emissive.multiplyScalar(brightness);
-        }
-      });
     });
   }
 
@@ -2237,6 +2236,10 @@ export class ExperienceScene {
       this.classroomRoot.remove(marker);
     }
     this.markers.clear();
+    this.markersByPartId.clear();
+    this.desktopGrabMarkerPartId = undefined;
+    this.grabbedMarkerController = undefined;
+    this.grabbedMarkerPartId = undefined;
     this.removeModelStateMarker();
     this.removeChromaMarker();
     this.removeObjectStateLabels();
@@ -2441,6 +2444,25 @@ export class ExperienceScene {
           return;
         }
       }
+
+      if (this.role === "teacher") {
+        const markerHits = this.raycaster.intersectObjects([...this.markersByPartId.values()], false);
+        if (markerHits.length > 0) {
+          const hitMesh = markerHits[0].object as THREE.Mesh;
+          for (const [partId, mesh] of this.markersByPartId) {
+            if (mesh === hitMesh) {
+              this.desktopGrabMarkerPartId = partId;
+              this.desktopGrabActive = true;
+              this.desktopGrabMode = "free";
+              this.desktopGrabDistance = Math.max(0.5, Math.min(10, this.raycaster.ray.origin.distanceTo(markerHits[0].point)));
+              this.desktopGrabPointerId = event.pointerId;
+              this.renderer.domElement.setPointerCapture(event.pointerId);
+              event.preventDefault();
+              return;
+            }
+          }
+        }
+      }
     }
 
     if (this.selectModelStateMarkerFromCurrentRay()) {
@@ -2491,6 +2513,12 @@ export class ExperienceScene {
       } else if (this.desktopGrabTarget === "model" && this.modelRoot) {
         this.modelRoot.position.copy(this.classroomRoot.worldToLocal(target));
         this.emitModelPositionChange();
+      } else if (this.desktopGrabMarkerPartId) {
+        const marker = this.markersByPartId.get(this.desktopGrabMarkerPartId);
+        if (marker) {
+          marker.position.copy(this.classroomRoot.worldToLocal(target));
+          this.emitPartMarkerPositionChange(this.desktopGrabMarkerPartId);
+        }
       }
       event.preventDefault();
       return;
@@ -2517,6 +2545,10 @@ export class ExperienceScene {
     }
     if (this.desktopGrabActive && this.desktopGrabTarget === "model") {
       this.emitModelPositionChange(true);
+    }
+    if (this.desktopGrabActive && this.desktopGrabMarkerPartId) {
+      this.emitPartMarkerPositionChange(this.desktopGrabMarkerPartId, true);
+      this.desktopGrabMarkerPartId = undefined;
     }
     this.desktopLookActive = false;
     this.desktopGrabActive = false;
@@ -3124,6 +3156,23 @@ export class ExperienceScene {
       return;
     }
 
+    const markerHitsXr = this.raycastFromController(controller, [...this.markersByPartId.values()], false);
+    if (markerHitsXr.length > 0 && this.role === "teacher") {
+      const hitMesh = markerHitsXr[0].object as THREE.Mesh;
+      for (const [partId, mesh] of this.markersByPartId) {
+        if (mesh === hitMesh) {
+          this.grabbedMarkerController = controller;
+          this.grabbedMarkerPartId = partId;
+          this.grabbedModelDuringSelect = true;
+          const controllerPosition = new THREE.Vector3();
+          controller.getWorldPosition(controllerPosition);
+          this.grabbedMarkerDistance = Math.max(0.35, Math.min(8, controllerPosition.distanceTo(markerHitsXr[0].point)));
+          this.updateGrabbedMarkerPosition();
+          return;
+        }
+      }
+    }
+
     const chromaHit = this.chromaBillboard?.visible ? this.raycastFromController(controller, [this.chromaBillboard], false)[0] : undefined;
     if (chromaHit) {
       this.grabbedChromaController = controller;
@@ -3159,8 +3208,13 @@ export class ExperienceScene {
     if (this.grabbedChromaController && this.chromaBillboard) {
       this.emitChromaTransformChange(true);
     }
+    if (this.grabbedMarkerController && this.grabbedMarkerPartId) {
+      this.emitPartMarkerPositionChange(this.grabbedMarkerPartId, true);
+    }
     this.grabbedModelController = undefined;
     this.grabbedChromaController = undefined;
+    this.grabbedMarkerController = undefined;
+    this.grabbedMarkerPartId = undefined;
     this.objectRotationActive = false;
   };
 
@@ -3337,6 +3391,37 @@ export class ExperienceScene {
 
     this.chromaBillboard.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedChromaDistance)));
     this.emitChromaTransformChange();
+  }
+
+  private updateGrabbedMarkerPosition(): void {
+    if (!this.grabbedMarkerController || !this.grabbedMarkerPartId) {
+      return;
+    }
+    const marker = this.markersByPartId.get(this.grabbedMarkerPartId);
+    if (!marker) {
+      return;
+    }
+    const origin = new THREE.Vector3();
+    const direction = new THREE.Vector3(0, 0, -1);
+    this.grabbedMarkerController.updateMatrixWorld();
+    origin.setFromMatrixPosition(this.grabbedMarkerController.matrixWorld);
+    direction.applyQuaternion(this.grabbedMarkerController.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    marker.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedMarkerDistance)));
+    this.emitPartMarkerPositionChange(this.grabbedMarkerPartId);
+  }
+
+  private emitPartMarkerPositionChange(partId: string, force = false): void {
+    const marker = this.markersByPartId.get(partId);
+    if (!marker) {
+      return;
+    }
+    const now = performance.now();
+    if (!force && now - this.lastMarkerPositionSync < 80) {
+      return;
+    }
+    const { x, y, z } = marker.position;
+    this.options.onPartMarkerPositionChange(partId, [x, y, z]);
+    this.lastMarkerPositionSync = now;
   }
 
   private emitModelPositionChange(force = false): void {
@@ -3645,6 +3730,7 @@ export class ExperienceScene {
     this.updateRightThumbstickTeleport();
     this.updateGrabbedModelPosition();
     this.updateGrabbedChromaPosition();
+    this.updateGrabbedMarkerPosition();
     this.updateTeleportDebugPanel();
     if (this.renderer.xr.isPresenting && this.role && this.xrMenuVisible && !this.xrPanelAnchored) {
       this.anchorXrPanelInFrontOfUser();

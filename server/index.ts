@@ -7,12 +7,14 @@ import {
   normalizeObjectMarkerState,
   normalizeObjectMarkerStates,
   normalizeParticipantPresence,
+  normalizePartMarkerPositions,
   type ChromaBillboardState,
   type ClientCommand,
   type ClientMessage,
   type ObjectMarkerStates,
   type Participant,
   type ParticipantPresence,
+  type PartMarkerPositions,
   type Role,
   type SceneObjectId,
   type ServerMessage,
@@ -38,6 +40,7 @@ interface SessionRecord {
   chromaBillboard: ChromaBillboardState;
   objectMarkerStates: ObjectMarkerStates;
   teleportEnabled: boolean;
+  partMarkerPositions: PartMarkerPositions;
 }
 
 const port = Number(process.env.PORT ?? 8787);
@@ -145,7 +148,8 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
       modelPosition: null,
       chromaBillboard: createDefaultChromaBillboardState(),
       objectMarkerStates: createDefaultObjectMarkerStates(),
-      teleportEnabled: false
+      teleportEnabled: false,
+      partMarkerPositions: {}
     };
     sessions.set(code, session);
     clients.set(socket, { socket, participant, sessionCode: code });
@@ -286,6 +290,20 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
     }
     session.teleportEnabled = message.enabled;
     broadcastState(session);
+    return;
+  }
+
+  if (message.type === "set-part-marker-position") {
+    if (client.participant.role !== "teacher") {
+      send(socket, { type: "error", message: "Only the teacher can place markers." });
+      return;
+    }
+    session.partMarkerPositions = {
+      ...session.partMarkerPositions,
+      [message.partId]: message.position
+    };
+    broadcastState(session);
+    return;
   }
 }
 
@@ -322,7 +340,8 @@ function broadcastState(session: SessionRecord): void {
     modelPosition: session.modelPosition,
     chromaBillboard: session.chromaBillboard,
     objectMarkerStates: session.objectMarkerStates,
-    teleportEnabled: session.teleportEnabled
+    teleportEnabled: session.teleportEnabled,
+    partMarkerPositions: session.partMarkerPositions
   });
 }
 
@@ -447,6 +466,14 @@ function parseClientMessage(data: RawData): ClientMessage | undefined {
   if (parsed.type === "set-teleport-enabled") {
     return typeof parsed.enabled === "boolean"
       ? { type: "set-teleport-enabled", enabled: parsed.enabled }
+      : undefined;
+  }
+
+  if (parsed.type === "set-part-marker-position") {
+    return typeof parsed.partId === "string" && parsed.partId.length > 0 && parsed.partId.length <= 80 &&
+      Array.isArray(parsed.position) && parsed.position.length === 3 &&
+      parsed.position.every((v) => typeof v === "number" && Number.isFinite(v))
+      ? { type: "set-part-marker-position", partId: parsed.partId, position: parsed.position as Vector3Tuple }
       : undefined;
   }
 

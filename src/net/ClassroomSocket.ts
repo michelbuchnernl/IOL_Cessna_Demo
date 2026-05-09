@@ -5,6 +5,7 @@ import {
   normalizeObjectMarkerState,
   normalizeObjectMarkerStates,
   normalizeParticipantPresence,
+  normalizePartMarkerPositions,
   type ChromaBillboardState,
   type ClientCommand,
   type ClientMessage,
@@ -12,6 +13,7 @@ import {
   type ObjectMarkerStates,
   type Participant,
   type ParticipantPresence,
+  type PartMarkerPositions,
   type Role,
   type SceneObjectId,
   type ServerMessage,
@@ -32,6 +34,7 @@ export interface ClassroomSocketState {
   chromaBillboard: ChromaBillboardState;
   objectMarkerStates: ObjectMarkerStates;
   teleportEnabled: boolean;
+  partMarkerPositions: PartMarkerPositions;
   error?: string;
 }
 
@@ -53,7 +56,8 @@ export class ClassroomSocket extends EventTarget {
     modelPosition: null,
     chromaBillboard: createDefaultChromaBillboardState(),
     objectMarkerStates: createDefaultObjectMarkerStates(),
-    teleportEnabled: false
+    teleportEnabled: false,
+    partMarkerPositions: {}
   };
 
   constructor(private readonly endpoint = getDefaultWebSocketUrl()) {
@@ -109,6 +113,10 @@ export class ClassroomSocket extends EventTarget {
     this.send({ type: "set-teleport-enabled", enabled });
   }
 
+  setPartMarkerPosition(partId: string, position: Vector3Tuple): void {
+    this.send({ type: "set-part-marker-position", partId, position });
+  }
+
   setParticipantPresence(presence: ParticipantPresence): void {
     const normalized = normalizeParticipantPresence(presence);
     if (!normalized) {
@@ -129,7 +137,8 @@ export class ClassroomSocket extends EventTarget {
       modelPosition: null,
       chromaBillboard: createDefaultChromaBillboardState(),
       objectMarkerStates: createDefaultObjectMarkerStates(),
-      teleportEnabled: false
+      teleportEnabled: false,
+      partMarkerPositions: {}
     };
     this.emitChange();
   }
@@ -200,6 +209,7 @@ export class ClassroomSocket extends EventTarget {
         chromaBillboard: normalizeChromaBillboardState(message.chromaBillboard),
         objectMarkerStates: normalizeObjectMarkerStates(message.objectMarkerStates),
         teleportEnabled: message.teleportEnabled,
+        partMarkerPositions: normalizePartMarkerPositions(message.partMarkerPositions),
         error: undefined
       };
       this.emitChange();

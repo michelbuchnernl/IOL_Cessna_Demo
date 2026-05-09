@@ -3,6 +3,7 @@ export type Vector3Tuple = [number, number, number];
 export type QuaternionTuple = [number, number, number, number];
 export type ChromaPlaybackMode = "loop" | "once";
 export type SceneObjectId = "model" | "chroma";
+export type PartMarkerPositions = Record<string, Vector3Tuple>;
 export type ObjectMarkerState = "green" | "orange" | "red";
 export type ObjectMarkerStates = Record<SceneObjectId, ObjectMarkerState>;
 
@@ -135,6 +136,22 @@ export function normalizeObjectMarkerState(value: unknown): ObjectMarkerState {
   return value === "orange" || value === "red" ? value : "green";
 }
 
+export function normalizePartMarkerPositions(value: unknown): PartMarkerPositions {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const result: PartMarkerPositions = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    const pos = Array.isArray(val) && val.length === 3 && val.every((v) => typeof v === "number" && Number.isFinite(v))
+      ? (val as Vector3Tuple)
+      : null;
+    if (pos) {
+      result[key] = pos;
+    }
+  }
+  return result;
+}
+
 export type ClientCommand =
   | "start-experience"
   | "shell-off"
@@ -205,6 +222,11 @@ export type ClientMessage =
   | {
       type: "set-teleport-enabled";
       enabled: boolean;
+    }
+  | {
+      type: "set-part-marker-position";
+      partId: string;
+      position: Vector3Tuple;
     };
 
 export type ServerMessage =
@@ -230,6 +252,7 @@ export type ServerMessage =
       chromaBillboard: ChromaBillboardState;
       objectMarkerStates: ObjectMarkerStates;
       teleportEnabled: boolean;
+      partMarkerPositions: PartMarkerPositions;
     }
   | {
       type: "teacher-command";

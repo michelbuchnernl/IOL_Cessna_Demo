@@ -8,13 +8,13 @@ export const cessnaExperience: ExperienceConfig = {
   tabletControlMode: "inspect",
   model: {
     url: "/assets/experiences/iol-cessna-demo/models/turbofan.glb",
-    scale: 1,
-    position: [-8, 0, -7],
-    rotation: [0, Math.PI / 2, 0]
+    scale: 0.45,
+    position: [8, 0, 1],
+    rotation: [0, (90 - 136) * Math.PI / 180, 0]
   },
   environment: {
     vrGarageUrl: "/assets/experiences/iol-cessna-demo/environments/hangar.glb",
-    brightness: 0.5
+    brightness: 0.2
   },
   parts: [
     {

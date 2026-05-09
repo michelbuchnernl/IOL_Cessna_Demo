@@ -12,6 +12,7 @@ import {
   type ChromaKeySettings,
   type ChromaPlaybackMode,
   type ObjectMarkerState,
+  type PartMarkerPositions,
   type SceneObjectId,
   type Vector3Tuple,
   type ClientCommand
@@ -55,6 +56,7 @@ interface AppState {
   chromaHeight: number;
   chromaPlaybackMode: ChromaPlaybackMode;
   chromaPlaybackRevision: number;
+  partMarkerPositions: PartMarkerPositions;
 }
 
 const initialChromaMemory = loadPersistentChromaMemory();
@@ -77,7 +79,8 @@ export class ClassroomApp {
     chromaScale: initialChromaMemory.scale,
     chromaHeight: initialChromaMemory.height,
     chromaPlaybackMode: initialChromaMemory.playbackMode,
-    chromaPlaybackRevision: 0
+    chromaPlaybackRevision: 0,
+    partMarkerPositions: {}
   };
 
   constructor(
@@ -821,6 +824,9 @@ export class ClassroomApp {
             this.socket.setModelPosition(position);
           }
         },
+        onPartMarkerPositionChange: (partId, position) => {
+          this.socket.setPartMarkerPosition(partId, position);
+        },
         onChromaTransformChange: (position, scale) => {
           if (this.state.role === "teacher") {
             this.state.chromaPosition = position;
@@ -891,6 +897,7 @@ export class ClassroomApp {
     this.scene?.setChromaBillboardState(this.state.socket.chromaBillboard);
     this.scene?.setObjectMarkerStates(this.state.socket.objectMarkerStates);
     this.scene?.setMarkersVisible(this.state.socket.commands["reveal-markers"]);
+    this.scene?.setPartMarkerPositions(this.state.socket.partMarkerPositions);
     if (this.state.socket.commands["start-experience"]) {
       this.scene?.startExperience();
     }
