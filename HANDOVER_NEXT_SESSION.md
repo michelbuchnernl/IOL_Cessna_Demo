@@ -8,6 +8,26 @@ We are working in:
 
 Current goal: stabilize the IOL Cessna Demo for Quest testing and presentation.
 
+## V3 Sleep Note - May 10, 2026
+
+V3 is the current stable demo checkpoint to commit.
+
+What works well enough to preserve:
+
+- Teacher monitor placement flow works.
+- Student Quest flow works for the currently tested video interactions.
+- Tablet flow works.
+- Remote participant labels/HMD/controllers were added and survived testing.
+- Optimized hangar GLB is in use and build still passes.
+- Image quality was tuned with lower exposure, XR framebuffer scaling, foveation adjustment, and texture anisotropy.
+- Teacher asset placement menu exists for monitor `Alt + right mouse` and Quest Teacher `A` path, but see the active bug below.
+
+Active V3 bug to pick up next:
+
+- Teacher Quest controller input is still broken. Right thumbstick does not rotate/teleport, `B` does not open the slider/menu panel, and `A` placement is still dead from inside Teacher Quest VR.
+- Teacher monitor and Student Quest still work, so preserve current behavior while debugging this.
+- Likely next debugging step: add an in-headset XR input diagnostic overlay/log for `session.inputSources`, `handedness`, gamepad axes, and button pressed states in Teacher Quest mode. The current fallback resolver in `src/scene/ExperienceScene.ts` may still not match what Quest Browser exposes for the teacher session.
+
 ## Current Run State
 
 Quest/WebXR HTTPS stack is currently running with:
@@ -171,4 +191,3 @@ Boeing and Turbofan:
 ```text
 Continue IOL_Cessna_Demo from HANDOVER_NEXT_SESSION.md. First inspect git status and current ExperienceScene participant/video paths. Fix two active Quest bugs: teacher only sees student controller but not label/HMD, and student sees no video balls/Cessna video. Preserve the current per-video prep state work and keep npm run build passing. Restart npm run dev:all and give Quest URLs after fixes.
 ```
-

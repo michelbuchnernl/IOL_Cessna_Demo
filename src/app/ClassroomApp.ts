@@ -1084,8 +1084,8 @@ export class ClassroomApp {
             this.socket.setObjectScale(scale);
           }
         },
-        onModelPositionChange: (position) => {
-          if (this.state.role === "teacher" && !this.state.modelTransformLocked) {
+        onModelPositionChange: (position, options) => {
+          if (this.state.role === "teacher" && (!this.state.modelTransformLocked || options?.force)) {
             this.socket.setModelPosition(position);
           }
         },

@@ -51,7 +51,7 @@ interface SceneOptions {
   onAnimationStep: (direction: -1 | 1) => void;
   onScaleStep: (direction: -1 | 1) => void;
   onObjectScaleChange: (scale: number) => void;
-  onModelPositionChange: (position: Vector3Tuple) => void;
+  onModelPositionChange: (position: Vector3Tuple, options?: { force?: boolean }) => void;
   onPartMarkerPositionChange: (partId: string, position: Vector3Tuple) => void;
   onChromaTransformChange: (position: Vector3Tuple, scale: number) => void;
   onChromaBillboardStateChange: (state: ChromaBillboardState) => void;
@@ -103,6 +103,19 @@ interface ThumbstickAxes {
   y: number;
 }
 
+interface ControllerThumbstickInput {
+  source: XRInputSource;
+  controller?: THREE.Object3D;
+  axes: ThumbstickAxes;
+  magnitude: number;
+}
+
+interface ControllerButtonInput {
+  source?: XRInputSource;
+  controller?: THREE.Object3D;
+  pressed: boolean;
+}
+
 interface TeleportDebugState {
   enabled: boolean;
   rightControllerDetected: boolean;
@@ -143,6 +156,25 @@ interface PartVideoPlaybackOptions {
   muted?: boolean;
 }
 
+type PlacementAssetId =
+  | "cessna-video"
+  | "boeing-video"
+  | "turbine-video"
+  | "turbine-model"
+  | "student-spawn";
+
+interface PlacementMenuItem {
+  id: PlacementAssetId;
+  label: string;
+  partId?: string;
+}
+
+interface StudentSpawnAnchor {
+  position: THREE.Vector3;
+  lookAt: THREE.Vector3;
+  right: THREE.Vector3;
+}
+
 const uiButtonTextures: Partial<Record<XrButtonAction, string>> = {
   "back-menu": "/assets/ui-buttons/xr-classroom/home.png",
   calibrate: "/assets/ui-buttons/xr-classroom/calibrate-zero-spot.png",
@@ -171,6 +203,7 @@ const uiButtonAspects: Partial<Record<XrButtonAction, number>> = {
 
 const ANIMATION_STEPS = 7;
 const XR_PANEL_DISTANCE = 2;
+const RIGHT_CONTROLLER_A_BUTTON_INDEX = 4;
 const RIGHT_CONTROLLER_B_BUTTON_INDEX = 5;
 const THUMBSTICK_DEADZONE = 0.7;
 const TURN_DEADZONE = 0.65;
@@ -238,6 +271,34 @@ const DESKTOP_MAX_OBJECT_DISTANCE = 14;
 const CHROMA_DANCER_VIDEO_URL = "/assets/chroma/cessna-green-screen.mp4";
 const PARTICIPANT_HEADSET_ASSET_URL = "/assets/avatars/vr-hmd/vr-hmd.glb";
 const PARTICIPANT_HEADSET_TARGET_SIZE = 0.42;
+const SCENE_TONE_MAPPING_EXPOSURE = 0.145;
+const XR_FRAMEBUFFER_SCALE_FACTOR = 1.12;
+const XR_FOVEATION = 0.45;
+const TEXTURE_ANISOTROPY_LIMIT = 8;
+const MATERIAL_TEXTURE_KEYS = [
+  "map",
+  "emissiveMap",
+  "normalMap",
+  "roughnessMap",
+  "metalnessMap",
+  "aoMap",
+  "alphaMap",
+  "bumpMap",
+  "displacementMap",
+  "lightMap"
+];
+const PLACEMENT_MENU_WIDTH = 1.46;
+const PLACEMENT_MENU_ROW_HEIGHT = 0.18;
+const PLACEMENT_MENU_HEADER_HEIGHT = 0.24;
+const PLACEMENT_MENU_FOOTER_HEIGHT = 0.12;
+const PLACEMENT_MENU_CANVAS_WIDTH = 900;
+const PLACEMENT_MENU_CANVAS_ROW_HEIGHT = 118;
+const PLACEMENT_MENU_CANVAS_HEADER_HEIGHT = 156;
+const PLACEMENT_MENU_CANVAS_FOOTER_HEIGHT = 74;
+const PLACEMENT_MENU_Y_OFFSET = 1.16;
+const PLACEMENT_MENU_FORWARD_OFFSET = 0.08;
+const PLACEMENT_TARGET_FLOOR_OFFSET = 0.045;
+const PLACEMENT_LASER_MAX_DISTANCE = 100;
 const PARTICIPANT_PRESENCE_SYNC_INTERVAL_MS = 100;
 const REMOTE_HEAD_MIN_VISIBLE_HEIGHT = 0.45;
 const REMOTE_HEAD_FROM_HAND_OFFSET = 0.55;
@@ -290,7 +351,13 @@ function createFinitePlaneGeometry(width: number, height: number, fallbackWidth 
 export class ExperienceScene {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
-  private readonly renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  private readonly renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: true,
+    depth: true,
+    stencil: false,
+    powerPreference: "high-performance"
+  });
   private readonly dracoLoader = new DRACOLoader();
   private readonly loader = new GLTFLoader();
   private readonly textureLoader = new THREE.TextureLoader();
@@ -326,6 +393,37 @@ export class ExperienceScene {
       side: THREE.DoubleSide
     })
   );
+  private readonly placementLaser = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({
+      color: 0x7dd3fc,
+      transparent: true,
+      opacity: 0.94,
+      depthTest: false,
+      depthWrite: false
+    })
+  );
+  private readonly placementTarget = new THREE.Mesh(
+    new THREE.RingGeometry(0.16, 0.27, 48),
+    new THREE.MeshBasicMaterial({
+      color: 0x7dd3fc,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+  );
+  private readonly placementMenu = new THREE.Group();
+  private readonly placementButtons = new Map<THREE.Object3D, PlacementAssetId>();
+  private placementMenuSurface?: THREE.Mesh;
+  private placementMenuTexture?: THREE.CanvasTexture;
+  private placementTargetPoint?: THREE.Vector3;
+  private placementMenuTargetPoint?: THREE.Vector3;
+  private placementPointerActive = false;
+  private placementPointerId?: number;
+  private placementPointerController?: THREE.Object3D;
+  private studentSpawnAnchor?: StudentSpawnAnchor;
   private shellObjects: THREE.Object3D[] = [];
   private collisionObjects: THREE.Object3D[] = [];
   private navigationBounds?: THREE.Box3;
@@ -430,6 +528,8 @@ export class ExperienceScene {
   private frameDelta = 0.016;
   private loadVersion = 0;
   private currentExperience?: ExperienceConfig;
+  private rightAButtonReady = false;
+  private rightAWasPressed = false;
   private rightBWasPressed = false;
   private rightThumbstickWasActive = false;
   private rightThumbstickTurnWasActive = false;
@@ -441,6 +541,7 @@ export class ExperienceScene {
   private grabbedModelDuringSelect = false;
   private grabbedChromaDistance = 1.6;
   private teleportPreviewController?: THREE.Object3D;
+  private activeGamepadController?: THREE.Object3D;
   private objectRotationActive = false;
   private objectRotationAxis: ObjectRotationAxis = "roll";
   private readonly teleportDebugState: TeleportDebugState = {
@@ -460,9 +561,12 @@ export class ExperienceScene {
 
     this.camera.position.set(0, 1.55, 2.2);
     this.camera.rotation.order = "YXZ";
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.16;
+    this.renderer.toneMappingExposure = SCENE_TONE_MAPPING_EXPOSURE;
     this.renderer.xr.enabled = true;
+    this.renderer.xr.setFramebufferScaleFactor(XR_FRAMEBUFFER_SCALE_FACTOR);
+    this.renderer.xr.setFoveation(XR_FOVEATION);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     options.container.append(this.renderer.domElement);
     this.refreshViewport();
@@ -488,7 +592,15 @@ export class ExperienceScene {
     this.teleportTarget.rotation.x = -Math.PI / 2;
     this.teleportTarget.visible = false;
     this.teleportTarget.renderOrder = 10;
+    this.placementLaser.visible = false;
+    this.placementLaser.renderOrder = 30;
+    this.placementTarget.rotation.x = -Math.PI / 2;
+    this.placementTarget.visible = false;
+    this.placementTarget.renderOrder = 31;
+    this.placementMenu.visible = false;
+    this.placementMenu.renderOrder = 32;
     this.scene.add(this.teleportArc, this.teleportTarget);
+    this.scene.add(this.placementLaser, this.placementTarget, this.placementMenu);
     this.updateTeleportDebugPanel();
     void this.loadParticipantHeadsetTemplate();
 
@@ -569,6 +681,7 @@ export class ExperienceScene {
           this.environmentRoot = gltf.scene;
           this.applyEnvironmentTransform(gltf.scene, experience.environment);
           this.applyEnvironmentBrightness(gltf.scene, experience.environment?.brightness ?? 1);
+          this.applyTextureQuality(gltf.scene);
           this.scene.add(gltf.scene);
           this.addTeleportFloor(gltf.scene);
           this.registerCollisionObjects(gltf.scene);
@@ -635,6 +748,8 @@ export class ExperienceScene {
     this.xrControlPanel.visible = this.xrMenuVisible;
     if (role !== "teacher") {
       this.hideXrChromaPanel();
+      this.cancelPlacementPointer();
+      this.hidePlacementMenu();
     }
     this.xrPanelAnchored = false;
     this.updateChromaMarkerVisibility();
@@ -1588,6 +1703,268 @@ export class ExperienceScene {
     context.fillText(label, x + w / 2, y + h / 2);
   }
 
+  private getPlacementMenuItems(): PlacementMenuItem[] {
+    const parts = this.currentExperience?.parts ?? [];
+    const findPart = (matcher: (part: ExperiencePartConfig) => boolean) => parts.find((part) => Boolean(part.videoUrl) && matcher(part));
+    const cessnaPart = findPart((part) => part.id.includes("cessna") || part.label.toLowerCase().includes("cessna"));
+    const boeingPart = findPart((part) => part.id.includes("boeing") || part.label.toLowerCase().includes("boeing"));
+    const turbinePart = findPart((part) =>
+      part.id.includes("turbofan") ||
+      part.id.includes("turbine") ||
+      part.label.toLowerCase().includes("turbofan") ||
+      part.label.toLowerCase().includes("turbine")
+    );
+    const items: PlacementMenuItem[] = [];
+
+    if (cessnaPart) {
+      items.push({ id: "cessna-video", label: "Cessna Video", partId: cessnaPart.id });
+    }
+    if (boeingPart) {
+      items.push({ id: "boeing-video", label: "Boeing Video", partId: boeingPart.id });
+    }
+    if (turbinePart) {
+      items.push({ id: "turbine-video", label: "Turbine Video", partId: turbinePart.id });
+    }
+    if (this.modelRoot) {
+      items.push({ id: "turbine-model", label: "Turbine" });
+    }
+    items.push({ id: "student-spawn", label: "Spawn point students" });
+    return items;
+  }
+
+  private showPlacementMenu(targetWorldPoint: THREE.Vector3): void {
+    const items = this.getPlacementMenuItems();
+    if (items.length === 0) {
+      return;
+    }
+
+    this.hidePlacementMenu();
+    this.placementMenuTargetPoint = targetWorldPoint.clone();
+    const width = PLACEMENT_MENU_WIDTH;
+    const height = PLACEMENT_MENU_HEADER_HEIGHT + items.length * PLACEMENT_MENU_ROW_HEIGHT + PLACEMENT_MENU_FOOTER_HEIGHT;
+    const canvasHeight = PLACEMENT_MENU_CANVAS_HEADER_HEIGHT +
+      items.length * PLACEMENT_MENU_CANVAS_ROW_HEIGHT +
+      PLACEMENT_MENU_CANVAS_FOOTER_HEIGHT;
+    const canvas = document.createElement("canvas");
+    canvas.width = PLACEMENT_MENU_CANVAS_WIDTH;
+    canvas.height = canvasHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    this.drawPlacementMenuCanvas(context, items);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    });
+    const surface = new THREE.Mesh(createFinitePlaneGeometry(width, height), material);
+    surface.renderOrder = 32;
+    this.placementMenu.add(surface);
+    this.placementMenuSurface = surface;
+    this.placementMenuTexture = texture;
+
+    for (const [index, item] of items.entries()) {
+      const button = new THREE.Mesh(
+        new THREE.BoxGeometry(width - 0.16, PLACEMENT_MENU_ROW_HEIGHT * 0.78, 0.08),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.001,
+          depthTest: false,
+          depthWrite: false
+        })
+      );
+      button.position.set(0, height / 2 - PLACEMENT_MENU_HEADER_HEIGHT - PLACEMENT_MENU_ROW_HEIGHT * (index + 0.5), 0.04);
+      button.renderOrder = 33;
+      this.placementMenu.add(button);
+      this.placementButtons.set(button, item.id);
+    }
+
+    const cameraPosition = this.getActiveCameraWorldPosition();
+    const menuPosition = targetWorldPoint.clone();
+    menuPosition.y += PLACEMENT_MENU_Y_OFFSET;
+    const towardCamera = cameraPosition.clone().sub(menuPosition).setY(0);
+    if (towardCamera.lengthSq() > 0.001) {
+      menuPosition.addScaledVector(towardCamera.normalize(), PLACEMENT_MENU_FORWARD_OFFSET);
+    }
+    const distanceToCamera = menuPosition.distanceTo(cameraPosition);
+    this.placementMenu.scale.setScalar(Math.min(2.25, Math.max(1, distanceToCamera / 4.5)));
+    this.placementMenu.position.copy(menuPosition);
+    this.placementMenu.visible = true;
+    this.updatePlacementMenuFacing();
+  }
+
+  private drawPlacementMenuCanvas(context: CanvasRenderingContext2D, items: PlacementMenuItem[]): void {
+    const { width, height } = context.canvas;
+    context.clearRect(0, 0, width, height);
+    this.fillRoundRect(context, 0, 0, width, height, 34, "rgba(15, 23, 42, 0.95)");
+    context.strokeStyle = "rgba(125, 211, 252, 0.6)";
+    context.lineWidth = 4;
+    this.strokeRoundRect(context, 3, 3, width - 6, height - 6, 34);
+
+    context.fillStyle = "#f8fafc";
+    context.font = "800 48px Arial";
+    context.textAlign = "left";
+    context.textBaseline = "middle";
+    context.fillText("Move asset here", 48, PLACEMENT_MENU_CANVAS_HEADER_HEIGHT * 0.42);
+    context.fillStyle = "#bae6fd";
+    context.font = "600 28px Arial";
+    context.fillText("Select one item", 50, PLACEMENT_MENU_CANVAS_HEADER_HEIGHT * 0.72);
+
+    for (const [index, item] of items.entries()) {
+      const y = PLACEMENT_MENU_CANVAS_HEADER_HEIGHT + index * PLACEMENT_MENU_CANVAS_ROW_HEIGHT + 16;
+      const fill = index % 2 === 0 ? "rgba(30, 41, 59, 0.94)" : "rgba(51, 65, 85, 0.9)";
+      this.fillRoundRect(context, 42, y, width - 84, PLACEMENT_MENU_CANVAS_ROW_HEIGHT - 22, 20, fill);
+      context.strokeStyle = "rgba(148, 163, 184, 0.28)";
+      context.lineWidth = 2;
+      this.strokeRoundRect(context, 42, y, width - 84, PLACEMENT_MENU_CANVAS_ROW_HEIGHT - 22, 20);
+      context.fillStyle = "#f8fafc";
+      context.font = item.label.length > 17 ? "800 34px Arial" : "800 39px Arial";
+      context.fillText(item.label, 78, y + (PLACEMENT_MENU_CANVAS_ROW_HEIGHT - 22) / 2);
+    }
+
+    context.fillStyle = "#7dd3fc";
+    context.font = "600 24px Arial";
+    context.fillText("Alt + right mouse / A button sets this point", 50, height - 38);
+  }
+
+  private hidePlacementMenu(): void {
+    for (const child of [...this.placementMenu.children]) {
+      this.placementMenu.remove(child);
+      const mesh = child as THREE.Mesh;
+      if (mesh.geometry) {
+        mesh.geometry.dispose();
+      }
+      const material = mesh.material;
+      if (Array.isArray(material)) {
+        material.forEach((item) => item.dispose());
+      } else if (material) {
+        material.dispose();
+      }
+    }
+    this.placementButtons.clear();
+    this.placementMenuSurface = undefined;
+    this.placementMenuTexture?.dispose();
+    this.placementMenuTexture = undefined;
+    this.placementMenuTargetPoint = undefined;
+    this.placementMenu.scale.setScalar(1);
+    this.placementMenu.visible = false;
+  }
+
+  private updatePlacementMenuFacing(): void {
+    if (!this.placementMenu.visible) {
+      return;
+    }
+
+    const cameraWorldPosition = this.getActiveCameraWorldPosition();
+    const targetWorldPosition = this.placementMenu.getWorldPosition(new THREE.Vector3());
+    this.placementMenu.lookAt(cameraWorldPosition.x, targetWorldPosition.y, cameraWorldPosition.z);
+  }
+
+  private getPlacementAssetFromRaycaster(): PlacementAssetId | undefined {
+    if (!this.placementMenu.visible || this.placementButtons.size === 0) {
+      return undefined;
+    }
+
+    const hit = this.raycaster.intersectObjects([...this.placementButtons.keys()], false)[0];
+    return hit ? this.placementButtons.get(hit.object) : undefined;
+  }
+
+  private isRayBlockedByPlacementMenu(): boolean {
+    return Boolean(
+      this.placementMenu.visible &&
+      this.placementMenuSurface &&
+      this.raycaster.intersectObject(this.placementMenuSurface, false).length > 0
+    );
+  }
+
+  private placeAssetAtPlacementTarget(assetId: PlacementAssetId): void {
+    const targetWorldPoint = this.placementMenuTargetPoint?.clone();
+    if (!targetWorldPoint) {
+      return;
+    }
+
+    if (assetId === "student-spawn") {
+      this.setStudentSpawnAnchor(targetWorldPoint);
+      this.hidePlacementMenu();
+      return;
+    }
+
+    if (assetId === "turbine-model") {
+      this.placeModelAtWorldPoint(targetWorldPoint);
+      this.hidePlacementMenu();
+      return;
+    }
+
+    const item = this.getPlacementMenuItems().find((candidate) => candidate.id === assetId);
+    if (item?.partId) {
+      this.placePartVideoAtWorldPoint(item.partId, targetWorldPoint);
+    }
+    this.hidePlacementMenu();
+  }
+
+  private placeModelAtWorldPoint(targetWorldPoint: THREE.Vector3): void {
+    if (!this.modelRoot) {
+      return;
+    }
+
+    const localPoint = this.classroomRoot.worldToLocal(targetWorldPoint.clone());
+    const nextPosition: Vector3Tuple = [localPoint.x, localPoint.y, localPoint.z];
+    this.setModelPosition(nextPosition);
+    this.options.onModelPositionChange(nextPosition, { force: true });
+  }
+
+  private placePartVideoAtWorldPoint(partId: string, targetWorldPoint: THREE.Vector3): void {
+    const part = this.getPartFromId(partId);
+    const marker = this.markersByPartId.get(partId);
+    if (!part || !marker) {
+      return;
+    }
+
+    const localPoint = this.classroomRoot.worldToLocal(targetWorldPoint.clone());
+    const prepState = this.getVideoPrepStateForPart(part);
+    const height = prepState.position?.[1] ?? marker.position.y ?? part.markerPosition[1];
+    const nextPosition: Vector3Tuple = [localPoint.x, height, localPoint.z];
+    marker.position.fromArray(nextPosition);
+    this.setVideoPrepState(partId, { ...prepState, position: nextPosition, height });
+    this.options.onPartMarkerPositionChange(partId, nextPosition);
+  }
+
+  private setStudentSpawnAnchor(targetWorldPoint: THREE.Vector3): void {
+    const position = this.classroomRoot.worldToLocal(targetWorldPoint.clone());
+    position.y = 0;
+    const viewerPose = this.getRemoteParticipantViewerPose();
+    const lookAt = viewerPose.position.clone();
+    const forwardToTeacher = lookAt.clone().sub(position).setY(0);
+    if (forwardToTeacher.lengthSq() < 0.001) {
+      forwardToTeacher.copy(viewerPose.forward).multiplyScalar(-1);
+    }
+    forwardToTeacher.normalize();
+    const right = new THREE.Vector3().crossVectors(forwardToTeacher, new THREE.Vector3(0, 1, 0));
+    if (right.lengthSq() < 0.001) {
+      right.copy(viewerPose.right);
+    }
+    right.normalize();
+
+    this.studentSpawnAnchor = { position, lookAt, right };
+    this.refreshStudentSpawnAnchor();
+  }
+
+  private refreshStudentSpawnAnchor(): void {
+    const visuals = [...this.remoteParticipants.values()];
+    for (const [index, visual] of visuals.entries()) {
+      this.applyRemoteParticipantSpawn(visual, index, visuals.length);
+    }
+  }
+
   private fillRoundRect(
     context: CanvasRenderingContext2D,
     x: number,
@@ -1614,6 +1991,118 @@ export class ExperienceScene {
     context.beginPath();
     context.roundRect(x, y, width, height, radius);
     context.stroke();
+  }
+
+  private getActiveCameraWorldPosition(): THREE.Vector3 {
+    const viewer = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+    viewer.updateMatrixWorld(true);
+    return viewer.getWorldPosition(new THREE.Vector3());
+  }
+
+  private startDesktopPlacementPointer(event: PointerEvent): void {
+    this.hidePlacementMenu();
+    this.hideTeleportPreview();
+    this.placementPointerActive = true;
+    this.placementPointerId = event.pointerId;
+    this.placementPointerController = undefined;
+    this.renderer.domElement.setPointerCapture(event.pointerId);
+    this.updatePlacementPointerFromPointerEvent(event);
+  }
+
+  private updatePlacementPointerFromPointerEvent(event: PointerEvent): void {
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
+    this.pointer.y = -(((event.clientY - bounds.top) / bounds.height) * 2 - 1);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.updatePlacementPointerFromRay(this.raycaster.ray.origin, this.raycaster.ray.direction);
+  }
+
+  private updatePlacementPointerFromController(controller: THREE.Object3D): void {
+    const origin = new THREE.Vector3();
+    const direction = new THREE.Vector3(0, 0, -1);
+    controller.updateMatrixWorld();
+    origin.setFromMatrixPosition(controller.matrixWorld);
+    direction.applyQuaternion(controller.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    this.updatePlacementPointerFromRay(origin, direction);
+  }
+
+  private updatePlacementPointerFromRay(origin: THREE.Vector3, direction: THREE.Vector3): void {
+    const normalizedDirection = direction.clone().normalize();
+    const targetPoint = this.resolvePlacementTarget(origin, normalizedDirection);
+    const start = origin.clone().addScaledVector(normalizedDirection, 0.08);
+    const end = targetPoint ?? origin.clone().addScaledVector(normalizedDirection, 7);
+
+    this.placementLaser.geometry.setFromPoints([start, end]);
+    this.placementLaser.visible = true;
+    this.placementTargetPoint = targetPoint?.clone();
+    this.placementTarget.visible = Boolean(targetPoint);
+    if (targetPoint) {
+      this.placementTarget.position.copy(targetPoint);
+      this.placementTarget.position.y += PLACEMENT_TARGET_FLOOR_OFFSET;
+      const material = this.placementTarget.material as THREE.MeshBasicMaterial;
+      material.color.set(0x7dd3fc);
+    }
+  }
+
+  private resolvePlacementTarget(origin: THREE.Vector3, direction: THREE.Vector3): THREE.Vector3 | undefined {
+    return this.resolveTeleportRay(origin, direction, PLACEMENT_LASER_MAX_DISTANCE).targetPoint;
+  }
+
+  private finishPlacementPointer(): void {
+    const targetPoint = this.placementTargetPoint?.clone();
+    this.cancelPlacementPointer();
+    if (targetPoint) {
+      this.showPlacementMenu(targetPoint);
+    }
+  }
+
+  private cancelPlacementPointer(): void {
+    this.placementPointerActive = false;
+    this.placementPointerId = undefined;
+    this.placementPointerController = undefined;
+    this.placementTargetPoint = undefined;
+    this.placementLaser.visible = false;
+    this.placementTarget.visible = false;
+  }
+
+  private updateRightControllerPlacementButton(): void {
+    const session = this.renderer.xr.getSession();
+    if (!session || this.role !== "teacher") {
+      this.rightAButtonReady = false;
+      this.rightAWasPressed = false;
+      if (this.placementPointerController) {
+        this.cancelPlacementPointer();
+      }
+      return;
+    }
+
+    const button = this.getControllerButtonInput(RIGHT_CONTROLLER_A_BUTTON_INDEX);
+    const isPressed = button.pressed;
+    const controller = button.controller ?? this.findRightController();
+    const thumbstick = this.getRightThumbstickAxes();
+    const thumbstickInUse = Boolean(thumbstick && (Math.abs(thumbstick.x) > TURN_DEADZONE || Math.abs(thumbstick.y) > THUMBSTICK_DEADZONE));
+
+    if (thumbstickInUse && this.placementPointerController) {
+      this.cancelPlacementPointer();
+    }
+
+    if (!isPressed) {
+      this.rightAButtonReady = true;
+    }
+
+    if (isPressed && controller && this.rightAButtonReady && !thumbstickInUse) {
+      if (!this.rightAWasPressed) {
+        this.hidePlacementMenu();
+        this.hideTeleportPreview();
+        this.placementPointerActive = true;
+        this.placementPointerController = controller;
+      }
+      this.updatePlacementPointerFromController(controller);
+    } else if (!isPressed && this.rightAWasPressed && this.placementPointerController) {
+      this.finishPlacementPointer();
+    }
+
+    this.rightAWasPressed = isPressed;
   }
 
   private createControllerRay(): THREE.Line {
@@ -1712,6 +2201,7 @@ export class ExperienceScene {
           this.modelBaseScale = experience.model.fitToDisplaySize
             ? this.fitModelToDisplaySize(root, experience.model.scale, experience.model.fitToDisplaySize)
             : experience.model.scale;
+          this.applyTextureQuality(root);
           root.visible = true;
           this.modelRoot = root;
           this.applyPendingModelPosition();
@@ -1779,6 +2269,7 @@ export class ExperienceScene {
           if (prop.fitToDisplaySize) {
             this.fitModelToDisplaySize(root, prop.scale, prop.fitToDisplaySize);
           }
+          this.applyTextureQuality(root);
           root.visible = true;
           this.propRoots.push(root);
           this.classroomRoot.add(root);
@@ -1842,6 +2333,8 @@ export class ExperienceScene {
 
         texture.mapping = THREE.EquirectangularReflectionMapping;
         texture.colorSpace = THREE.SRGBColorSpace;
+        texture.anisotropy = Math.min(TEXTURE_ANISOTROPY_LIMIT, this.renderer.capabilities.getMaxAnisotropy());
+        texture.needsUpdate = true;
         this.environmentSkyboxTexture?.dispose();
         this.environmentSkyboxTexture = texture;
         this.scene.background = texture;
@@ -2181,7 +2674,14 @@ export class ExperienceScene {
       return state === "green" && this.role === "student";
     }
     if (activationMode === "teacher") {
-      return this.experienceStarted && this.role === "teacher";
+      const state = this.partMarkerStates[part.id] ?? "green";
+      if (state === "red") {
+        return false;
+      }
+      if (state === "orange") {
+        return this.role === "teacher";
+      }
+      return this.role === "teacher" || this.role === "student";
     }
     return this.markersVisible;
   }
@@ -2624,6 +3124,42 @@ export class ExperienceScene {
     });
   }
 
+  private applyTextureQuality(root: THREE.Object3D): void {
+    const anisotropy = Math.min(TEXTURE_ANISOTROPY_LIMIT, this.renderer.capabilities.getMaxAnisotropy());
+    if (anisotropy <= 1) {
+      return;
+    }
+
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh) {
+        return;
+      }
+
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        this.applyMaterialTextureQuality(material, anisotropy);
+      }
+    });
+  }
+
+  private applyMaterialTextureQuality(material: THREE.Material | undefined, anisotropy: number): void {
+    if (!material) {
+      return;
+    }
+
+    const materialTextures = material as unknown as Record<string, THREE.Texture | null | undefined>;
+    for (const key of MATERIAL_TEXTURE_KEYS) {
+      const texture = materialTextures[key];
+      if (!texture?.isTexture) {
+        continue;
+      }
+
+      texture.anisotropy = Math.max(texture.anisotropy, anisotropy);
+      texture.needsUpdate = true;
+    }
+  }
+
   private async loadParticipantHeadsetTemplate(): Promise<void> {
     if (this.participantHeadsetTemplate || this.participantHeadsetTemplatePromise) {
       return this.participantHeadsetTemplatePromise ?? Promise.resolve();
@@ -2633,6 +3169,7 @@ export class ExperienceScene {
       this.loader.load(
         PARTICIPANT_HEADSET_ASSET_URL,
         (gltf) => {
+          this.applyTextureQuality(gltf.scene);
           this.participantHeadsetTemplate = this.createParticipantHeadsetTemplate(gltf.scene);
           this.refreshRemoteParticipantHeadsets();
           resolve();
@@ -2765,6 +3302,17 @@ export class ExperienceScene {
   }
 
   private applyRemoteParticipantSpawn(visual: RemoteParticipantVisual, spawnIndex: number, spawnCount: number): void {
+    if (this.studentSpawnAnchor) {
+      const spreadOffset = (spawnIndex - (spawnCount - 1) / 2) * REMOTE_PARTICIPANT_SPAWN_SPREAD;
+      const spawnPosition = this.studentSpawnAnchor.position
+        .clone()
+        .addScaledVector(this.studentSpawnAnchor.right, spreadOffset);
+      spawnPosition.y = 0;
+      visual.root.position.copy(spawnPosition);
+      visual.root.lookAt(this.studentSpawnAnchor.lookAt.x, visual.root.position.y, this.studentSpawnAnchor.lookAt.z);
+      return;
+    }
+
     const viewerPose = this.getRemoteParticipantViewerPose();
     const spreadOffset = (spawnIndex - (spawnCount - 1) / 2) * REMOTE_PARTICIPANT_SPAWN_SPREAD;
     const spawnPosition = viewerPose.position
@@ -3309,6 +3857,9 @@ export class ExperienceScene {
     this.markersVisible = false;
     this.experienceStarted = false;
     this.hideTeleportPreview();
+    this.cancelPlacementPointer();
+    this.hidePlacementMenu();
+    this.studentSpawnAnchor = undefined;
     this.lastStableTeleportTargetPoint = undefined;
     this.lastStableTeleportTargetValid = false;
     this.teleportDebugState.targetPoint = undefined;
@@ -3631,6 +4182,12 @@ export class ExperienceScene {
       return;
     }
 
+    if (event.button === 2 && event.altKey && this.role === "teacher" && !this.renderer.xr.isPresenting) {
+      this.startDesktopPlacementPointer(event);
+      event.preventDefault();
+      return;
+    }
+
     if (event.button === 2) {
       this.reanchorInspectMousePivot();
       this.desktopLookActive = true;
@@ -3643,6 +4200,19 @@ export class ExperienceScene {
     this.pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
     this.pointer.y = -(((event.clientY - bounds.top) / bounds.height) * 2 - 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    if (event.button === 0 && this.placementMenu.visible) {
+      const placementAsset = this.getPlacementAssetFromRaycaster();
+      if (placementAsset) {
+        this.placeAssetAtPlacementTarget(placementAsset);
+        event.preventDefault();
+        return;
+      }
+      if (this.isRayBlockedByPlacementMenu()) {
+        event.preventDefault();
+        return;
+      }
+    }
 
     if (event.button === 1 && this.role === "teacher") {
       const chromaHit = this.chromaBillboard?.visible ? this.raycaster.intersectObject(this.chromaBillboard, false)[0] : undefined;
@@ -3755,6 +4325,12 @@ export class ExperienceScene {
       return;
     }
 
+    if (this.placementPointerActive && this.placementPointerId === event.pointerId) {
+      this.updatePlacementPointerFromPointerEvent(event);
+      event.preventDefault();
+      return;
+    }
+
     if (!this.desktopLookActive || this.renderer.xr.isPresenting) {
       return;
     }
@@ -3768,6 +4344,15 @@ export class ExperienceScene {
   private handlePointerUp = (event: PointerEvent): void => {
     if (event.pointerType === "touch") {
       this.handleTouchPointerUp(event);
+      return;
+    }
+
+    if (this.placementPointerActive && this.placementPointerId === event.pointerId) {
+      this.finishPlacementPointer();
+      if (this.renderer.domElement.hasPointerCapture(event.pointerId)) {
+        this.renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+      event.preventDefault();
       return;
     }
 
@@ -4262,6 +4847,15 @@ export class ExperienceScene {
     direction.applyQuaternion(controller.getWorldQuaternion(new THREE.Quaternion())).normalize();
     this.raycaster.set(origin, direction);
 
+    const placementAsset = this.getPlacementAssetFromRaycaster();
+    if (placementAsset) {
+      this.placeAssetAtPlacementTarget(placementAsset);
+      return;
+    }
+    if (this.isRayBlockedByPlacementMenu()) {
+      return;
+    }
+
     const action = this.getXrButtonActionFromRaycaster();
     if (action) {
       this.handleXrButtonAction(action);
@@ -4410,7 +5004,8 @@ export class ExperienceScene {
 
   private handleControllerSelectStart = (event: THREE.Event): void => {
     const controller = event.target as THREE.Object3D;
-    if (this.isRightController(controller)) {
+    if (this.isRightController(controller) || this.getInputSourceForController(controller)?.gamepad) {
+      this.activeGamepadController = controller;
       this.teleportPreviewController = controller;
     }
     if (this.role !== "teacher" || !this.isRightController(controller)) {
@@ -4425,6 +5020,12 @@ export class ExperienceScene {
       panelTargets.push(...this.xrChromaButtons.keys());
       if (this.xrChromaPanelSurface) {
         panelTargets.push(this.xrChromaPanelSurface);
+      }
+    }
+    if (this.placementMenu.visible) {
+      panelTargets.push(...this.placementButtons.keys());
+      if (this.placementMenuSurface) {
+        panelTargets.push(this.placementMenuSurface);
       }
     }
     if (panelTargets.length > 0 && this.raycastFromController(controller, panelTargets, false).length > 0) {
@@ -4515,9 +5116,12 @@ export class ExperienceScene {
     const controller = event.target as THREE.Object3D;
     if (event.data) {
       this.controllerInputSources.set(controller, event.data);
-      if (event.data.handedness === "right") {
+      if (event.data.gamepad && (event.data.handedness === "right" || !this.activeGamepadController)) {
+        this.activeGamepadController = controller;
+      }
+      if (event.data.handedness === "right" || (event.data.gamepad && !this.teleportPreviewController)) {
         this.teleportPreviewController = controller;
-        this.teleportDebugState.lastAttemptReason = "right controller connected";
+        this.teleportDebugState.lastAttemptReason = event.data.handedness === "right" ? "right controller connected" : "gamepad controller connected";
       }
     }
     this.teleportDebugState.rightControllerDetected = Boolean(this.findRightController());
@@ -4529,6 +5133,9 @@ export class ExperienceScene {
     this.controllerInputSources.delete(controller);
     if (this.teleportPreviewController === controller) {
       this.teleportPreviewController = undefined;
+    }
+    if (this.activeGamepadController === controller) {
+      this.activeGamepadController = undefined;
     }
     this.teleportDebugState.rightControllerDetected = Boolean(this.findRightController());
     this.updateTeleportDebugPanel();
@@ -4611,7 +5218,12 @@ export class ExperienceScene {
 
   private isRightController(controller: THREE.Object3D): boolean {
     const source = this.getInputSourceForController(controller);
-    return source?.handedness === "right" || controller === this.teleportPreviewController;
+    if (source?.handedness === "right" || controller === this.teleportPreviewController || controller === this.activeGamepadController) {
+      return true;
+    }
+
+    const rightSourceController = this.getControllerForInputSource(this.getRightInputSource());
+    return Boolean(rightSourceController && rightSourceController === controller);
   }
 
   private updateGrabbedModelPosition(): void {
@@ -4633,8 +5245,8 @@ export class ExperienceScene {
 
     const axes = this.getControllerAxes(this.grabbedModelController);
     if (axes) {
-      const scaleAxis = axes[2] ?? 0;
-      const distanceAxis = axes[3] ?? 0;
+      const scaleAxis = axes.x;
+      const distanceAxis = axes.y;
       if (this.objectRotationActive) {
         this.rotateGrabbedModel(scaleAxis, distanceAxis);
         this.modelRoot.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedModelDistance)));
@@ -4811,8 +5423,165 @@ export class ExperienceScene {
     this.modelRoot.rotateZ(amount);
   }
 
-  private getControllerAxes(controller: THREE.Object3D): readonly number[] | undefined {
-    return this.getInputSourceForController(controller)?.gamepad?.axes;
+  private getControllerAxes(controller: THREE.Object3D): ThumbstickAxes | undefined {
+    const source = this.getInputSourceForController(controller);
+    return source ? this.readThumbstickAxes(source) : undefined;
+  }
+
+  private getGamepadInputSources(): XRInputSource[] {
+    const session = this.renderer.xr.getSession();
+    if (!session) {
+      return [];
+    }
+
+    return Array.from(session.inputSources).filter((source) => Boolean(source.gamepad));
+  }
+
+  private getPreferredGamepadInputSources(): XRInputSource[] {
+    const sources = this.getGamepadInputSources();
+    const preferred: XRInputSource[] = [];
+    const push = (source?: XRInputSource): void => {
+      if (!source?.gamepad || preferred.includes(source)) {
+        return;
+      }
+      preferred.push(source);
+    };
+
+    push(sources.find((source) => source.handedness === "right"));
+    push(this.activeGamepadController ? this.getInputSourceForController(this.activeGamepadController) : undefined);
+    push(this.teleportPreviewController ? this.getInputSourceForController(this.teleportPreviewController) : undefined);
+    for (const source of sources.filter((inputSource) => inputSource.handedness === "none")) {
+      push(source);
+    }
+    for (const source of sources) {
+      push(source);
+    }
+    return preferred;
+  }
+
+  private readThumbstickAxes(source: XRInputSource): ThumbstickAxes | undefined {
+    const axes = source.gamepad?.axes;
+    if (!axes || axes.length < 2) {
+      return undefined;
+    }
+
+    const axisPairs: Array<[number, number]> = axes.length >= 4
+      ? [[2, 3], [0, 1]]
+      : [[0, 1]];
+    if (axes.length >= 6) {
+      axisPairs.push([4, 5]);
+    }
+
+    let bestAxes: ThumbstickAxes | undefined;
+    let bestMagnitude = -1;
+    for (const [xIndex, yIndex] of axisPairs) {
+      const x = Number(axes[xIndex] ?? 0);
+      const y = Number(axes[yIndex] ?? 0);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        continue;
+      }
+      const magnitude = Math.hypot(x, y);
+      if (magnitude > bestMagnitude) {
+        bestAxes = { x, y };
+        bestMagnitude = magnitude;
+      }
+    }
+
+    return bestAxes;
+  }
+
+  private getActiveThumbstickInput(): ControllerThumbstickInput | undefined {
+    const candidates = this.getPreferredGamepadInputSources()
+      .map((source): ControllerThumbstickInput | undefined => {
+        const axes = this.readThumbstickAxes(source);
+        if (!axes) {
+          return undefined;
+        }
+        return {
+          source,
+          controller: this.getControllerForInputSource(source),
+          axes,
+          magnitude: Math.hypot(axes.x, axes.y)
+        };
+      })
+      .filter((candidate): candidate is ControllerThumbstickInput => Boolean(candidate));
+
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    const activeCandidate = candidates.reduce((best, candidate) => (
+      candidate.magnitude > best.magnitude ? candidate : best
+    ), candidates[0]);
+    const chosen = activeCandidate.magnitude > 0.08 ? activeCandidate : candidates[0];
+    if (chosen.controller) {
+      this.activeGamepadController = chosen.controller;
+    }
+    return chosen;
+  }
+
+  private getControllerButtonInput(buttonIndex: number): ControllerButtonInput {
+    const sources = this.getPreferredGamepadInputSources();
+    for (const source of sources) {
+      const button = source.gamepad?.buttons[buttonIndex];
+      if (button?.pressed) {
+        const controller = this.getControllerForInputSource(source);
+        if (controller) {
+          this.activeGamepadController = controller;
+        }
+        return { source, controller, pressed: true };
+      }
+    }
+
+    const source = sources[0];
+    return {
+      source,
+      controller: source ? this.getControllerForInputSource(source) : this.findRightController(),
+      pressed: false
+    };
+  }
+
+  private getRightInputSource(): XRInputSource | undefined {
+    const sources = this.getPreferredGamepadInputSources();
+    return sources.find((source) => source.handedness === "right")
+      ?? sources.find((source) => source.handedness === "none")
+      ?? sources[0];
+  }
+
+  private getControllerForInputSource(source?: XRInputSource): THREE.Object3D | undefined {
+    if (!source) {
+      return undefined;
+    }
+
+    for (const [controller, mappedSource] of this.controllerInputSources) {
+      if (mappedSource === source) {
+        return controller;
+      }
+    }
+
+    if (source.handedness === "left" || source.handedness === "right") {
+      for (const [controller, mappedSource] of this.controllerInputSources) {
+        if (mappedSource.handedness === source.handedness) {
+          return controller;
+        }
+      }
+    }
+
+    const connectedControllers = Array.from(this.controllerInputSources.keys());
+    if (connectedControllers.length === 1) {
+      return connectedControllers[0];
+    }
+
+    const session = this.renderer.xr.getSession();
+    if (!session) {
+      return undefined;
+    }
+    const sessionIndex = Array.from(session.inputSources).indexOf(source);
+    if (sessionIndex >= 0 && sessionIndex <= 1) {
+      return this.renderer.xr.getController(sessionIndex);
+    }
+
+    return undefined;
   }
 
   private getInputSourceForController(controller: THREE.Object3D): XRInputSource | undefined {
@@ -4901,9 +5670,8 @@ export class ExperienceScene {
       return;
     }
 
-    const rightSource = Array.from(session.inputSources).find((source) => source.handedness === "right" && source.gamepad);
-    const button = rightSource?.gamepad?.buttons[RIGHT_CONTROLLER_B_BUTTON_INDEX];
-    const isPressed = Boolean(button?.pressed);
+    const button = this.getControllerButtonInput(RIGHT_CONTROLLER_B_BUTTON_INDEX);
+    const isPressed = button.pressed;
     if (isPressed && !this.rightBWasPressed) {
       this.xrMenuVisible = !this.xrMenuVisible;
       this.xrControlPanel.visible = this.xrMenuVisible;
@@ -5007,6 +5775,7 @@ export class ExperienceScene {
     this.updateRemoteParticipantLabelsFacing();
     this.updateDesktopControls(delta);
     this.updateTabletExploreControls(delta);
+    this.updateRightControllerPlacementButton();
     this.updateTeleportPreview();
     this.updateControllerRayVisibility();
     this.updateRightControllerMenuToggle();
@@ -5025,6 +5794,7 @@ export class ExperienceScene {
     this.updateChromaBillboardFacing();
     this.updatePartVideoPreviewFacing();
     this.updatePartVideoBillboardFacing();
+    this.updatePlacementMenuFacing();
     this.maybeSyncParticipantPresence();
     this.renderer.render(this.scene, this.camera);
   };
@@ -5302,7 +6072,8 @@ export class ExperienceScene {
     const teleportAiming = this.isTeleportAimActive();
 
     for (const [controller, ray] of this.controllerRays) {
-      ray.visible = !(teleportAiming && this.isRightController(controller));
+      const rightController = this.isRightController(controller);
+      ray.visible = !(teleportAiming && rightController);
     }
   }
 
@@ -5322,11 +6093,20 @@ export class ExperienceScene {
       }
     }
 
+    if (this.activeGamepadController) {
+      return this.activeGamepadController;
+    }
+
+    const inputController = this.getControllerForInputSource(this.getRightInputSource());
+    if (inputController) {
+      return inputController;
+    }
+
     if (this.teleportPreviewController) {
       return this.teleportPreviewController;
     }
 
-    return undefined;
+    return Array.from(this.controllerInputSources.keys())[0];
   }
 
   private getRightController(): THREE.Object3D {
@@ -5334,18 +6114,14 @@ export class ExperienceScene {
   }
 
   private getRightThumbstickAxes(): ThumbstickAxes | undefined {
-    const source = this.getInputSourceForController(this.getRightController())
-      ?? Array.from(this.controllerInputSources.values()).find((inputSource) => inputSource.handedness === "right" && inputSource.gamepad);
-    const axes = source?.gamepad?.axes;
-    if (!axes || axes.length < 2) {
+    const input = this.getActiveThumbstickInput();
+    if (!input) {
       return undefined;
     }
-
-    if (axes.length >= 4) {
-      return { x: axes[2] ?? 0, y: axes[3] ?? 0 };
+    if (input.controller) {
+      this.teleportPreviewController = input.controller;
     }
-
-    return { x: axes[0] ?? 0, y: axes[1] ?? 0 };
+    return input.axes;
   }
 
   private getTeleportPointForController(controller: THREE.Object3D): THREE.Vector3 | undefined {
