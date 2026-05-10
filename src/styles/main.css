@@ -182,11 +182,22 @@ p {
   display: grid;
   gap: 18px;
   width: min(440px, 100%);
+  min-width: 0;
+  max-height: calc(100vh - 40px);
+  overflow: auto;
   padding: 22px;
   background: #111827;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 8px;
   box-shadow: 0 24px 80px rgb(0 0 0 / 40%);
+}
+
+.modal-body > * {
+  min-width: 0;
+}
+
+.modal-body-keyboard {
+  width: min(760px, 100%);
 }
 
 .modal-body-wide {
@@ -201,6 +212,7 @@ label {
 
 input {
   width: 100%;
+  min-width: 0;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 8px;
   color: #f8fafc;
@@ -236,14 +248,42 @@ input[type="range"] {
 
 .code-pad {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 10px;
+}
+
+.code-pad-row,
+.name-pad-row {
+  display: flex;
+  justify-content: center;
+  gap: clamp(4px, 0.8vw, 8px);
+  min-width: 0;
 }
 
 .code-key {
   min-height: 48px;
+  min-width: 0;
+  width: clamp(34px, 6vw, 52px);
   padding: 10px 0;
   font-size: 1rem;
+}
+
+.name-pad {
+  display: grid;
+  gap: 8px;
+}
+
+.name-key {
+  min-height: 42px;
+  min-width: 0;
+  width: clamp(34px, 5.8vw, 54px);
+  padding: 9px 0;
+  font-size: 0.95rem;
+}
+
+.name-pad-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .code-pad-actions {
@@ -308,6 +348,11 @@ input[type="range"] {
 .assessment-link {
   color: #f8fafc;
   background: #334155;
+}
+
+.secondary-button.code-key,
+.secondary-button.name-key {
+  padding: 8px 0;
 }
 
 .ghost-button {
@@ -676,8 +721,9 @@ input[type="range"] {
     min-height: 68vh;
   }
 
-  .code-pad {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+  .code-key,
+  .name-key {
+    font-size: 0.82rem;
   }
 
   .tablet-overlay-explore {

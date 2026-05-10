@@ -6,18 +6,25 @@ import {
   normalizeObjectMarkerStates,
   normalizeParticipantPresence,
   normalizePartMarkerPositions,
+  normalizePartMarkerStates,
+  normalizeVideoPrepState,
+  normalizeVideoPrepStates,
   type ChromaBillboardState,
   type ClientCommand,
   type ClientMessage,
   type ObjectMarkerState,
   type ObjectMarkerStates,
   type Participant,
+  type ParticipantDeviceKind,
   type ParticipantPresence,
   type PartMarkerPositions,
+  type PartMarkerStates,
   type Role,
   type SceneObjectId,
   type ServerMessage,
-  type Vector3Tuple
+  type Vector3Tuple,
+  type VideoPrepState,
+  type VideoPrepStates
 } from "./protocol";
 
 type SocketStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
@@ -35,6 +42,8 @@ export interface ClassroomSocketState {
   objectMarkerStates: ObjectMarkerStates;
   teleportEnabled: boolean;
   partMarkerPositions: PartMarkerPositions;
+  partMarkerStates: PartMarkerStates;
+  videoPrepStates: VideoPrepStates;
   error?: string;
 }
 
@@ -57,7 +66,9 @@ export class ClassroomSocket extends EventTarget {
     chromaBillboard: createDefaultChromaBillboardState(),
     objectMarkerStates: createDefaultObjectMarkerStates(),
     teleportEnabled: false,
-    partMarkerPositions: {}
+    partMarkerPositions: {},
+    partMarkerStates: {},
+    videoPrepStates: {}
   };
 
   constructor(private readonly endpoint = getDefaultWebSocketUrl()) {
@@ -68,15 +79,15 @@ export class ClassroomSocket extends EventTarget {
     return structuredClone(this.state);
   }
 
-  createSession(experienceId: string, participantName: string): void {
+  createSession(experienceId: string, participantName: string, deviceKind: ParticipantDeviceKind): void {
     this.connect(() => {
-      this.send({ type: "create-session", experienceId, participantName });
+      this.send({ type: "create-session", experienceId, participantName, deviceKind });
     });
   }
 
-  joinSession(code: string, experienceId: string, role: Role, participantName: string): void {
+  joinSession(code: string, experienceId: string, role: Role, participantName: string, deviceKind: ParticipantDeviceKind): void {
     this.connect(() => {
-      this.send({ type: "join-session", code, experienceId, role, participantName });
+      this.send({ type: "join-session", code, experienceId, role, participantName, deviceKind });
     });
   }
 
@@ -117,6 +128,14 @@ export class ClassroomSocket extends EventTarget {
     this.send({ type: "set-part-marker-position", partId, position });
   }
 
+  setPartMarkerState(partId: string, state: ObjectMarkerState): void {
+    this.send({ type: "set-part-marker-state", partId, state: normalizeObjectMarkerState(state) });
+  }
+
+  setVideoPrepState(videoId: string, state: VideoPrepState): void {
+    this.send({ type: "set-video-prep-state", videoId, state: normalizeVideoPrepState(state) });
+  }
+
   setParticipantPresence(presence: ParticipantPresence): void {
     const normalized = normalizeParticipantPresence(presence);
     if (!normalized) {
@@ -138,7 +157,9 @@ export class ClassroomSocket extends EventTarget {
       chromaBillboard: createDefaultChromaBillboardState(),
       objectMarkerStates: createDefaultObjectMarkerStates(),
       teleportEnabled: false,
-      partMarkerPositions: {}
+      partMarkerPositions: {},
+      partMarkerStates: {},
+      videoPrepStates: {}
     };
     this.emitChange();
   }
@@ -210,6 +231,8 @@ export class ClassroomSocket extends EventTarget {
         objectMarkerStates: normalizeObjectMarkerStates(message.objectMarkerStates),
         teleportEnabled: message.teleportEnabled,
         partMarkerPositions: normalizePartMarkerPositions(message.partMarkerPositions),
+        partMarkerStates: normalizePartMarkerStates(message.partMarkerStates),
+        videoPrepStates: normalizeVideoPrepStates(message.videoPrepStates),
         error: undefined
       };
       this.emitChange();

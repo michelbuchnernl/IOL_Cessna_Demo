@@ -1,6 +1,6 @@
 # IOL_Cessna_Demo
 
-Single-experience WebXR classroom demo for inspecting a Cessna in AR, VR, and fallback mode with shared object controls and a chroma-keyed Cessna video.
+Single-experience WebXR classroom demo for inspecting an aircraft hangar in AR, VR, and fallback mode with shared object controls, teacher-prepped chroma-keyed videos, and student-triggered video markers.
 
 ## Stack
 
@@ -35,15 +35,36 @@ Then open `http://localhost:5173/`. This avoids local certificate errors in Code
 
 For the classroom presentation setup with a Mac, separate router, and multiple Quests, use the runbook in [docs/presentation-runbook.md](docs/presentation-runbook.md).
 
-## MVP flow
+## Teacher/student flow
 
 1. Choose Teacher or Student.
 2. Teacher creates a 4-character session code.
 3. Students join with that code.
 4. Each device presses Calibrate at the same classroom zero spot.
-5. Teacher starts the shared experience and controls Shell Off, Play Introduction, Reveal Markers, object sizing, marker visibility, and the greenscreen Cessna video.
-6. Students select revealed markers locally.
-7. Students open the configured assessment URL.
+5. Teacher starts the shared experience and controls Shell Off, Restart Video, Reveal Markers, object sizing, marker visibility, and the video prep panel.
+6. Teacher preps the videos before revealing them:
+   - Cessna video is teacher-controlled. The teacher calls it up and can size, lift, pause/play, and chroma-key it.
+   - Boeing and Turbofan videos are student-triggered blue-ball videos. The teacher can select each blue ball, size/lift/chroma-key the preview, and leave it paused while preparing.
+7. Teacher sets each student video access state:
+   - Green: armed for students. Students see the blue ball and can press it to play the video.
+   - Orange: teacher-only prep. Students do not see it.
+   - Red: hidden. Students do not see it; teacher sees only the recovery marker, with the preview hidden/not playing.
+8. Teacher presses Reveal Markers when the student-facing markers should appear.
+9. Students select green/armed blue balls locally to start their videos.
+10. Students open the configured assessment URL.
+
+## Video prep controls
+
+Select a video marker as Teacher to open the Green Screen Video panel.
+
+- Key sliders change the chroma-key settings for the selected/prepped video materials.
+- Video size resizes the selected video preview.
+- Height lifts or lowers the selected video marker/preview.
+- Play and Pause let the teacher check a clip while keeping the default prep state silent and paused.
+- Play From Start restarts the selected preview video.
+- Reset restores the default key/size/height values.
+
+For desktop prep, `Ctrl` + drag moves a video marker/preview, and `Shift` + mouse wheel adjusts its depth from the camera.
 
 ## Assets
 

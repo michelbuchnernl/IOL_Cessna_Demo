@@ -27,15 +27,15 @@ export const cessnaExperience: ExperienceConfig = {
     {
       id: "student-cessna-video",
       label: "Cessna Video",
-      markerPosition: [6.5, 1.4, -4.5],
-      explanation: "Student-activated Cessna video. Selecting the blue sphere plays the clip from beginning to end.",
+      markerPosition: [0, 1.8, -10],
+      explanation: "Teacher-controlled Cessna video for whole-class explanation.",
       videoUrl: "/assets/experiences/iol-cessna-demo/videos/cessna.mp4",
-      videoActivationMode: "student"
+      videoActivationMode: "teacher"
     },
     {
       id: "student-turbofan-video",
       label: "Turbofan Video",
-      markerPosition: [-6.2, 1.35, -5.2],
+      markerPosition: [-4.2, 1.5, -5.4],
       explanation: "Student-activated turbofan video. Selecting the blue sphere plays the clip from beginning to end.",
       videoUrl: "/assets/experiences/iol-cessna-demo/videos/turbine.mp4",
       videoActivationMode: "student"
@@ -43,10 +43,10 @@ export const cessnaExperience: ExperienceConfig = {
     {
       id: "teacher-boeing-video",
       label: "Boeing Video",
-      markerPosition: [0, 1.8, -10],
-      explanation: "Teacher-controlled Boeing video for whole-class explanation.",
+      markerPosition: [4.2, 1.5, -5.4],
+      explanation: "Student-activated Boeing video. Selecting the blue sphere plays the clip from beginning to end.",
       videoUrl: "/assets/experiences/iol-cessna-demo/videos/boeing.mp4",
-      videoActivationMode: "teacher"
+      videoActivationMode: "student"
     }
   ],
   introVideos: {

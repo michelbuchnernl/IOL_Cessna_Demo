@@ -6,8 +6,12 @@ import {
   normalizeChromaBillboardState,
   normalizeObjectMarkerState,
   normalizeObjectMarkerStates,
+  normalizeParticipantDeviceKind,
   normalizeParticipantPresence,
   normalizePartMarkerPositions,
+  normalizePartMarkerStates,
+  normalizeVideoPrepState,
+  normalizeVideoPrepStates,
   type ChromaBillboardState,
   type ClientCommand,
   type ClientMessage,
@@ -15,10 +19,12 @@ import {
   type Participant,
   type ParticipantPresence,
   type PartMarkerPositions,
+  type PartMarkerStates,
   type Role,
   type SceneObjectId,
   type ServerMessage,
-  type Vector3Tuple
+  type Vector3Tuple,
+  type VideoPrepStates
 } from "../src/net/protocol";
 
 type LiveSocket = WebSocket & { isAlive?: boolean };
@@ -41,6 +47,8 @@ interface SessionRecord {
   objectMarkerStates: ObjectMarkerStates;
   teleportEnabled: boolean;
   partMarkerPositions: PartMarkerPositions;
+  partMarkerStates: PartMarkerStates;
+  videoPrepStates: VideoPrepStates;
 }
 
 const port = Number(process.env.PORT ?? 8787);
@@ -137,7 +145,7 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
     }
 
     const code = generateCode();
-    const participant = createParticipant(message.participantName, "teacher");
+    const participant = createParticipant(message.participantName, "teacher", message.deviceKind);
     const session: SessionRecord = {
       code,
       experienceId: message.experienceId,
@@ -149,7 +157,9 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
       chromaBillboard: createDefaultChromaBillboardState(),
       objectMarkerStates: createDefaultObjectMarkerStates(),
       teleportEnabled: false,
-      partMarkerPositions: {}
+      partMarkerPositions: {},
+      partMarkerStates: {},
+      videoPrepStates: {}
     };
     sessions.set(code, session);
     clients.set(socket, { socket, participant, sessionCode: code });
@@ -173,7 +183,7 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
       send(socket, { type: "error", message: "This session is full." });
       return;
     }
-    const participant = createParticipant(message.participantName, message.role === "teacher" ? "teacher" : "student");
+    const participant = createParticipant(message.participantName, message.role === "teacher" ? "teacher" : "student", message.deviceKind);
     session.participants.set(participant.id, participant);
     clients.set(socket, { socket, participant, sessionCode: code });
     send(socket, { type: "joined-session", code, participantId: participant.id });
@@ -305,14 +315,52 @@ function handleMessage(socket: WebSocket, message: ClientMessage): void {
     broadcastState(session);
     return;
   }
+
+  if (message.type === "set-part-marker-state") {
+    if (client.participant.role !== "teacher") {
+      send(socket, { type: "error", message: "Only the teacher can set marker state." });
+      return;
+    }
+    session.partMarkerStates = {
+      ...session.partMarkerStates,
+      [message.partId]: normalizeObjectMarkerState(message.state)
+    };
+    broadcastState(session);
+    return;
+  }
+
+  if (message.type === "set-video-prep-state") {
+    if (client.participant.role !== "teacher") {
+      send(socket, { type: "error", message: "Only the teacher can prep videos." });
+      return;
+    }
+    const state = normalizeVideoPrepState(message.state);
+    session.videoPrepStates = {
+      ...session.videoPrepStates,
+      [message.videoId]: state
+    };
+    session.partMarkerStates = {
+      ...session.partMarkerStates,
+      [message.videoId]: state.markerState
+    };
+    if (state.position) {
+      session.partMarkerPositions = {
+        ...session.partMarkerPositions,
+        [message.videoId]: state.position
+      };
+    }
+    broadcastState(session);
+    return;
+  }
 }
 
-function createParticipant(name: string, role: "teacher" | "student"): Participant {
+function createParticipant(name: string, role: "teacher" | "student", deviceKind: unknown): Participant {
   const sanitizedName = sanitizeName(name);
   return {
     id: randomUUID(),
     name: sanitizedName || (role === "teacher" ? "Teacher" : "Student"),
     role,
+    deviceKind: normalizeParticipantDeviceKind(deviceKind),
     calibrated: false,
     connectedAt: Date.now(),
     presence: null
@@ -341,7 +389,9 @@ function broadcastState(session: SessionRecord): void {
     chromaBillboard: session.chromaBillboard,
     objectMarkerStates: session.objectMarkerStates,
     teleportEnabled: session.teleportEnabled,
-    partMarkerPositions: session.partMarkerPositions
+    partMarkerPositions: session.partMarkerPositions,
+    partMarkerStates: normalizePartMarkerStates(session.partMarkerStates),
+    videoPrepStates: normalizeVideoPrepStates(session.videoPrepStates)
   });
 }
 
@@ -370,7 +420,8 @@ function parseClientMessage(data: RawData): ClientMessage | undefined {
       ? {
           type: "create-session",
           experienceId: parsed.experienceId,
-          participantName: parsed.participantName
+          participantName: parsed.participantName,
+          deviceKind: normalizeParticipantDeviceKind(parsed.deviceKind)
         }
       : undefined;
   }
@@ -385,7 +436,8 @@ function parseClientMessage(data: RawData): ClientMessage | undefined {
           code: parsed.code.toUpperCase(),
           experienceId: parsed.experienceId,
           role: parsed.role as Role,
-          participantName: parsed.participantName
+          participantName: parsed.participantName,
+          deviceKind: normalizeParticipantDeviceKind(parsed.deviceKind)
         }
       : undefined;
   }
@@ -474,6 +526,18 @@ function parseClientMessage(data: RawData): ClientMessage | undefined {
       Array.isArray(parsed.position) && parsed.position.length === 3 &&
       parsed.position.every((v) => typeof v === "number" && Number.isFinite(v))
       ? { type: "set-part-marker-position", partId: parsed.partId, position: parsed.position as Vector3Tuple }
+      : undefined;
+  }
+
+  if (parsed.type === "set-part-marker-state") {
+    return typeof parsed.partId === "string" && parsed.partId.length > 0 && parsed.partId.length <= 80
+      ? { type: "set-part-marker-state", partId: parsed.partId, state: normalizeObjectMarkerState(parsed.state) }
+      : undefined;
+  }
+
+  if (parsed.type === "set-video-prep-state") {
+    return typeof parsed.videoId === "string" && parsed.videoId.length > 0 && parsed.videoId.length <= 80 && isRecord(parsed.state)
+      ? { type: "set-video-prep-state", videoId: parsed.videoId, state: normalizeVideoPrepState(parsed.state) }
       : undefined;
   }
 

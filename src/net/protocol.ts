@@ -3,9 +3,12 @@ export type Vector3Tuple = [number, number, number];
 export type QuaternionTuple = [number, number, number, number];
 export type ChromaPlaybackMode = "loop" | "once";
 export type SceneObjectId = "model" | "chroma";
+export type ParticipantDeviceKind = "pc" | "tablet" | "vr";
 export type PartMarkerPositions = Record<string, Vector3Tuple>;
 export type ObjectMarkerState = "green" | "orange" | "red";
 export type ObjectMarkerStates = Record<SceneObjectId, ObjectMarkerState>;
+export type PartMarkerStates = Record<string, ObjectMarkerState>;
+export type VideoPrepStates = Record<string, VideoPrepState>;
 
 export interface PresenceJoint {
   position: Vector3Tuple;
@@ -36,6 +39,17 @@ export interface ChromaBillboardState {
   height: number;
   playbackMode: ChromaPlaybackMode;
   playbackRevision: number;
+}
+
+export interface VideoPrepState {
+  settings: ChromaKeySettings;
+  position: Vector3Tuple | null;
+  scale: number;
+  height: number;
+  playbackMode: ChromaPlaybackMode;
+  playbackRevision: number;
+  playbackPaused: boolean;
+  markerState: ObjectMarkerState;
 }
 
 export const DEFAULT_CHROMA_KEY_SETTINGS: ChromaKeySettings = {
@@ -78,6 +92,19 @@ export function createDefaultChromaBillboardState(): ChromaBillboardState {
   };
 }
 
+export function createDefaultVideoPrepState(): VideoPrepState {
+  return {
+    settings: { ...DEFAULT_CHROMA_KEY_SETTINGS },
+    position: null,
+    scale: 1,
+    height: 1.4,
+    playbackMode: "loop",
+    playbackRevision: 0,
+    playbackPaused: false,
+    markerState: "green"
+  };
+}
+
 export function normalizeChromaKeySettings(value: unknown): ChromaKeySettings {
   const record = typeof value === "object" && value !== null ? value as Partial<Record<keyof ChromaKeySettings, unknown>> : {};
   return {
@@ -101,6 +128,32 @@ export function normalizeChromaBillboardState(value: unknown): ChromaBillboardSt
     playbackMode: record.playbackMode === "once" ? "once" : "loop",
     playbackRevision: normalizePlaybackRevision(record.playbackRevision)
   };
+}
+
+export function normalizeVideoPrepState(value: unknown): VideoPrepState {
+  const record = typeof value === "object" && value !== null ? value as Partial<Record<keyof VideoPrepState, unknown>> : {};
+  return {
+    settings: normalizeChromaKeySettings(record.settings),
+    position: normalizeVector3Tuple(record.position),
+    scale: normalizeChromaScale(record.scale),
+    height: normalizeChromaHeight(record.height),
+    playbackMode: record.playbackMode === "once" ? "once" : "loop",
+    playbackRevision: normalizePlaybackRevision(record.playbackRevision),
+    playbackPaused: record.playbackPaused === true,
+    markerState: normalizeObjectMarkerState(record.markerState)
+  };
+}
+
+export function normalizeVideoPrepStates(value: unknown): VideoPrepStates {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+
+  const result: VideoPrepStates = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    result[key] = normalizeVideoPrepState(val);
+  }
+  return result;
 }
 
 export function normalizeChromaScale(value: unknown): number {
@@ -136,6 +189,10 @@ export function normalizeObjectMarkerState(value: unknown): ObjectMarkerState {
   return value === "orange" || value === "red" ? value : "green";
 }
 
+export function normalizeParticipantDeviceKind(value: unknown): ParticipantDeviceKind {
+  return value === "vr" || value === "tablet" ? value : "pc";
+}
+
 export function normalizePartMarkerPositions(value: unknown): PartMarkerPositions {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {};
@@ -152,6 +209,17 @@ export function normalizePartMarkerPositions(value: unknown): PartMarkerPosition
   return result;
 }
 
+export function normalizePartMarkerStates(value: unknown): PartMarkerStates {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const result: PartMarkerStates = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    result[key] = normalizeObjectMarkerState(val);
+  }
+  return result;
+}
+
 export type ClientCommand =
   | "start-experience"
   | "shell-off"
@@ -162,6 +230,7 @@ export interface Participant {
   id: string;
   name: string;
   role: Role;
+  deviceKind: ParticipantDeviceKind;
   calibrated: boolean;
   connectedAt: number;
   presence: ParticipantPresence | null;
@@ -172,6 +241,7 @@ export type ClientMessage =
       type: "create-session";
       experienceId: string;
       participantName: string;
+      deviceKind?: ParticipantDeviceKind;
     }
   | {
       type: "join-session";
@@ -179,6 +249,7 @@ export type ClientMessage =
       experienceId: string;
       role: Role;
       participantName: string;
+      deviceKind?: ParticipantDeviceKind;
     }
   | {
       type: "calibrate";
@@ -227,6 +298,16 @@ export type ClientMessage =
       type: "set-part-marker-position";
       partId: string;
       position: Vector3Tuple;
+    }
+  | {
+      type: "set-part-marker-state";
+      partId: string;
+      state: ObjectMarkerState;
+    }
+  | {
+      type: "set-video-prep-state";
+      videoId: string;
+      state: VideoPrepState;
     };
 
 export type ServerMessage =
@@ -253,6 +334,8 @@ export type ServerMessage =
       objectMarkerStates: ObjectMarkerStates;
       teleportEnabled: boolean;
       partMarkerPositions: PartMarkerPositions;
+      partMarkerStates: PartMarkerStates;
+      videoPrepStates: VideoPrepStates;
     }
   | {
       type: "teacher-command";

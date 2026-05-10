@@ -16,6 +16,12 @@ Open:
 http://localhost:5173/
 ```
 
+If `5173` is already occupied, Vite will print the alternate local URL. During the latest Codex verification it used:
+
+```text
+http://localhost:5174/
+```
+
 Quest/WebXR testing:
 
 ```bash
@@ -29,6 +35,8 @@ https://<mac-ip>:5173/
 ```
 
 The HTTPS route is required for immersive WebXR on Quest Browser. The Codex in-app browser rejects the local self-signed HTTPS certificate, so use the HTTP-only Codex mode for visual debugging.
+
+After a machine restart, do not assume the pre-restart LAN address is still valid. Start `npm run dev:all` and use the HTTPS Network URL printed by Vite for the Quest Browser.
 
 ## Current Default Spawn
 
@@ -59,20 +67,64 @@ Teacher mode also has a `Capture View` button. Move/orbit to a better view, pres
 - Changed the model visibility label from `Cessna` to `Turbofan`.
 - Marked binary assets in `.gitattributes`.
 
-## Known Issue
+## Restart Handoff - May 10, 2026
 
-There is still a Three.js console warning:
+Latest git state before restart:
+
+```text
+## main...origin/main [ahead 1]
+ M src/scene/ExperienceScene.ts
+```
+
+Latest change:
+
+- Fixed the Three.js `_PlaneGeometry` NaN warning path by adding finite positive dimension guards in `src/scene/ExperienceScene.ts`.
+- All local `PlaneGeometry` creation now routes through `createFinitePlaneGeometry(...)`.
+- XR button width/aspect values are sanitized before creating both the visible button plane and matching hit target.
+- The teleport floor plane uses a finite fallback size of `14`.
+
+Verification already completed:
+
+- `npm run build` passed.
+- Codex browser rendered the teacher hangar scene.
+- Browser warn/error logs were empty after loading the scene.
+- The verified Codex URL was `http://localhost:5174/` because `5173` was occupied.
+
+Useful restart sequence:
+
+```bash
+cd "/Users/michelbuchner/Documents/New project/IOL_Cessna_Demo"
+git status --short --branch
+npm run build
+npm run dev:codex:all
+```
+
+For Quest testing after restart:
+
+```bash
+npm run dev:all
+```
+
+Then open the HTTPS Network URL printed by Vite on the Quest, for example:
+
+```text
+https://<mac-ip>:5173/
+```
+
+## Resolved Issue
+
+This warning was the active issue for the latest handoff and should now be resolved:
 
 ```text
 THREE.BufferGeometry.computeBoundingSphere(): Computed radius is NaN. The "position" attribute is likely to have NaN values. _PlaneGeometry
 ```
 
-The scene still renders and `npm run build` passes. Next useful task: reproduce this warning on a fresh page load, identify which `PlaneGeometry` gets a NaN dimension, and fix it so presentation debugging stays quiet.
+If it appears again, inspect any new `PlaneGeometry` call sites first and make sure derived width/height values are finite positive numbers before constructing geometry.
 
 ## Suggested Next Prompt
 
 ```text
-Continue IOL_Cessna_Demo from NEXT_STEPS.md. First inspect git status, then fix the Three.js PlaneGeometry warning and verify the Codex browser view.
+Continue IOL_Cessna_Demo from NEXT_STEPS.md after restart. First inspect git status, run npm build, then start the appropriate dev server and verify the Codex browser or Quest URL.
 ```
 
 ## Presentation Priorities

@@ -32,7 +32,7 @@ npm run dev:all
 7. Teacher creates a session code.
 8. Students join with that code.
 9. All devices press Calibrate at the same classroom zero spot.
-10. Teacher starts the shared experience and drives the lesson controls.
+10. Teacher starts the shared experience, preps the videos, reveals student markers, and drives the lesson controls.
 
 ## HTTPS Decision Tree
 
@@ -64,7 +64,9 @@ Trusted HTTPS options:
 - Update Quest Browser only before the rehearsal, not right before the presentation.
 - Open the demo URL on each Quest during rehearsal.
 - Confirm each Quest can join a session.
-- Confirm video playback starts from student and teacher activators.
+- Confirm teacher can prep video size, height, pause/play, and chroma key.
+- Confirm Boeing and Turbofan blue-ball videos can be armed for students.
+- Confirm Cessna remains teacher-controlled.
 - Confirm the calibration spot is physically marked in the room.
 
 ## Mac Checklist
@@ -87,9 +89,18 @@ Trusted HTTPS options:
 6. Join as student on Quest.
 7. Calibrate both devices at the same physical zero spot.
 8. Start the experience.
-9. Toggle markers.
-10. Trigger the Cessna, turbofan, and Boeing videos.
-11. Repeat with all five Quests connected.
+9. As teacher, select each video marker and prep it in the Green Screen Video panel:
+   - Cessna is teacher-controlled.
+   - Boeing and Turbofan are student blue-ball videos.
+   - Keep previews paused unless checking a clip.
+10. Set student video states:
+   - Green means armed and visible to students.
+   - Orange means teacher-only prep.
+   - Red means hidden/recovery only.
+11. Reveal markers.
+12. On Quest, trigger the green Boeing and Turbofan blue balls as a student.
+13. Trigger the Cessna video from the teacher side.
+14. Repeat with all five Quests connected.
 
 ## Presentation Backup
 

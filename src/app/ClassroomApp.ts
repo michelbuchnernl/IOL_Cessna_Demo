@@ -8,12 +8,20 @@ import {
   normalizeChromaHeight,
   normalizeChromaKeySettings,
   normalizeChromaScale,
+  normalizeObjectMarkerState,
+  normalizeVideoPrepState,
+  normalizeVideoPrepStates,
   type ChromaBillboardState,
   type ChromaKeySettings,
   type ChromaPlaybackMode,
   type ObjectMarkerState,
   type PartMarkerPositions,
+  type PartMarkerStates,
+  type Participant,
+  type ParticipantDeviceKind,
   type SceneObjectId,
+  type VideoPrepState,
+  type VideoPrepStates,
   type Vector3Tuple,
   type ClientCommand
 } from "../net/protocol";
@@ -26,7 +34,11 @@ type Screen = "select-experience" | "role" | "session";
 type Role = "teacher" | "student";
 type ChromaSettingKey = keyof ChromaKeySettings;
 const SESSION_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_KEY_ROWS = ["QWERTYUP", "ASDFGHJKL", "ZXCVBNM", "23456789"];
+const NAME_KEY_ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
+const MAX_PARTICIPANT_NAME_LENGTH = 18;
 const CHROMA_SETTINGS_STORAGE_KEY = "iol-cessna-demo:chroma-key-settings:v1";
+const VIDEO_PREP_SETTINGS_STORAGE_KEY = "iol-cessna-demo:video-prep-settings:v1";
 const APP_TITLE = "IOL Cessna Demo";
 const APP_TAGLINE = "Single-experience WebXR classroom";
 
@@ -58,14 +70,20 @@ interface AppState {
   chromaPlaybackMode: ChromaPlaybackMode;
   chromaPlaybackRevision: number;
   partMarkerPositions: PartMarkerPositions;
+  partMarkerStates: PartMarkerStates;
+  videoPrepStates: VideoPrepStates;
+  modelTransformLocked: boolean;
 }
 
 const initialChromaMemory = loadPersistentChromaMemory();
+const initialVideoPrepMemory = loadPersistentVideoPrepMemory();
 
 export class ClassroomApp {
   private readonly socket = new ClassroomSocket();
   private scene?: ExperienceScene;
   private loadedSceneKey?: string;
+  private readonly pendingTeacherCommands = new Set<ClientCommand>();
+  private videoPrepBootstrapSessionCode?: string;
   private state: AppState = {
     screen: "select-experience",
     mode: "fallback",
@@ -81,7 +99,10 @@ export class ClassroomApp {
     chromaHeight: initialChromaMemory.height,
     chromaPlaybackMode: initialChromaMemory.playbackMode,
     chromaPlaybackRevision: 0,
-    partMarkerPositions: {}
+    partMarkerPositions: {},
+    partMarkerStates: {},
+    videoPrepStates: initialVideoPrepMemory,
+    modelTransformLocked: false
   };
 
   constructor(
@@ -97,16 +118,24 @@ export class ClassroomApp {
     }
     this.socket.addEventListener("change", (event) => {
       this.state.socket = (event as CustomEvent<ClassroomSocketState>).detail;
+      this.state.videoPrepStates = {
+        ...this.state.videoPrepStates,
+        ...normalizeVideoPrepStates(this.state.socket.videoPrepStates)
+      };
       if (this.state.role === "teacher" && (this.state.socket.chromaBillboard.visible || this.state.socket.chromaBillboard.position)) {
         this.applyLocalChromaState(this.state.socket.chromaBillboard);
       }
       this.applySharedState();
       this.loadTeacherSharedScene();
       this.loadStudentMonitorScene();
+      this.bootstrapTeacherVideoPrepState();
       this.render();
     });
     this.socket.addEventListener("teacher-command", (event) => {
-      this.applyTeacherCommand((event as CustomEvent<ClientCommand>).detail);
+      const command = (event as CustomEvent<ClientCommand>).detail;
+      if (!this.applyTeacherCommand(command)) {
+        this.pendingTeacherCommands.add(command);
+      }
     });
     this.socket.addEventListener("participant-presence", (event) => {
       const detail = (event as CustomEvent<{ participants: ClassroomSocketState["participants"] }>).detail;
@@ -198,13 +227,27 @@ export class ClassroomApp {
     if (this.state.screen === "role") {
       return `
         <div class="modal">
-          <div class="modal-body">
+          <div class="modal-body modal-body-keyboard">
             <h2>Choose role</h2>
             <p>${this.state.selectedExperience?.title ?? ""}</p>
             <label>
               Display name
-              <input id="participant-name" value="${this.escape(this.state.name)}" placeholder="Student 1" autocomplete="name" enterkeyhint="done" />
+              <input id="participant-name" type="text" maxlength="${MAX_PARTICIPANT_NAME_LENGTH}" value="${this.escape(this.state.name)}" placeholder="Student 1" inputmode="text" autocapitalize="words" autocomplete="name" enterkeyhint="done" />
             </label>
+            <div class="name-pad">
+              ${NAME_KEY_ROWS.map((row) => `
+                <div class="name-pad-row">
+                  ${row.split("").map((character) => `
+                    <button class="secondary-button name-key" data-name-key="${character}">${character}</button>
+                  `).join("")}
+                </div>
+              `).join("")}
+              <div class="name-pad-actions">
+                <button class="secondary-button" data-name-key=" ">Space</button>
+                <button class="secondary-button" data-action="name-backspace">Backspace</button>
+                <button class="secondary-button" data-action="name-clear">Clear</button>
+              </div>
+            </div>
             <div class="role-grid">
               <button class="primary-button" data-role="teacher">Teacher</button>
               <button class="secondary-button" data-role="student">Student</button>
@@ -250,8 +293,12 @@ export class ClassroomApp {
             </label>`}
             <div class="join-code-display" aria-live="polite">${this.renderJoinCodeSlots()}</div>
             <div class="code-pad">
-              ${SESSION_CODE_ALPHABET.split("").map((character) => `
-                <button class="secondary-button code-key" data-action="code-key" data-code-key="${character}">${character}</button>
+              ${CODE_KEY_ROWS.map((row) => `
+                <div class="code-pad-row">
+                  ${row.split("").map((character) => `
+                    <button class="secondary-button code-key" data-code-key="${character}">${character}</button>
+                  `).join("")}
+                </div>
               `).join("")}
             </div>
             <div class="code-pad-actions">
@@ -396,12 +443,31 @@ export class ClassroomApp {
       <ul class="participant-list">
         ${participants.map((participant) => `
           <li>
-            <span>${this.escape(participant.name)} <small>${participant.role}</small></span>
+            <span>${this.escape(this.getParticipantDisplayName(participant))} <small>${participant.role}</small></span>
             <strong class="${participant.calibrated ? "ok" : "muted"}">${participant.calibrated ? "calibrated" : "waiting"}</strong>
           </li>
         `).join("") || "<li><span>No one connected yet</span></li>"}
       </ul>
     `;
+  }
+
+  private getParticipantDisplayName(participant: Participant): string {
+    return `${participant.name} (${this.getParticipantDeviceLabel(participant)})`;
+  }
+
+  private getParticipantDeviceLabel(participant: Participant): "VR" | "PC" | "TAB" {
+    const kind = participant.presence?.inVr ? "vr" : participant.deviceKind;
+    if (kind === "vr") {
+      return "VR";
+    }
+    return kind === "tablet" ? "TAB" : "PC";
+  }
+
+  private getLocalParticipantDeviceKind(): ParticipantDeviceKind {
+    if (this.state.capabilities.vr) {
+      return "vr";
+    }
+    return this.state.capabilities.ipad || this.state.capabilities.touch ? "tablet" : "pc";
   }
 
   private renderTeacherControls(): string {
@@ -439,7 +505,7 @@ export class ClassroomApp {
     return `
       <label class="scale-control">
         Size
-        <input data-action="object-scale" type="range" min="0.25" max="2" step="0.05" value="${this.state.socket.objectScale}" />
+        <input data-action="object-scale" type="range" min="0.25" max="2" step="0.05" value="${this.state.socket.objectScale}" ${this.state.modelTransformLocked ? "disabled" : ""} />
       </label>
     `;
   }
@@ -454,6 +520,7 @@ export class ClassroomApp {
         Turbofan
         ${this.renderObjectStateSelect("model")}
       </label>
+      <button class="secondary-button" data-action="toggle-model-lock">${this.state.modelTransformLocked ? "Unlock Turbofan" : "Lock Turbofan"}</button>
       <label class="object-state-control">
         Turbine Video
         ${this.renderObjectStateSelect("chroma")}
@@ -479,7 +546,6 @@ export class ClassroomApp {
     }
 
     const videoActivationMode = this.getPartVideoActivationMode(part);
-    const autoPlay = videoActivationMode === "student" || videoActivationMode === "teacher";
     const controls = videoActivationMode === "standard";
     const activationText = videoActivationMode === "student"
       ? "Student-activated video"
@@ -493,7 +559,7 @@ export class ClassroomApp {
         <h2>${part.label}</h2>
         <p>${part.explanation}</p>
         ${activationText ? `<p>${activationText}</p>` : ""}
-        ${part.videoUrl ? `<video ${controls ? "controls" : ""} ${autoPlay ? 'data-auto-play="true"' : ""} playsinline preload="auto" src="${part.videoUrl}"></video>` : ""}
+        ${part.videoUrl && controls ? `<video controls playsinline preload="auto" src="${part.videoUrl}"></video>` : ""}
       </aside>
     `;
   }
@@ -503,30 +569,32 @@ export class ClassroomApp {
       return "";
     }
 
+    const prepState = this.getCurrentChromaPanelState();
     return `
       <aside class="chroma-panel">
         <button class="close-button" data-action="close-chroma-panel">×</button>
-        <h2>Green Screen Turbine Video</h2>
-        <p>Adjust the key until the green disappears without cutting into the Cessna footage. Values are remembered on this device.</p>
+        <h2>Green Screen Video</h2>
+        <p>Adjust the key until the green disappears without cutting into the footage. Values are remembered on this device.</p>
+        ${this.renderSelectedPartMarkerStateControl()}
         <label class="chroma-control">
           <span>
             Video size
-            <output data-chroma-value="scale">${this.state.chromaScale.toFixed(2)}</output>
+            <output data-chroma-value="scale">${prepState.scale.toFixed(2)}</output>
           </span>
-          <input data-action="chroma-scale" type="range" min="${CHROMA_BILLBOARD_SCALE_LIMITS.min}" max="${CHROMA_BILLBOARD_SCALE_LIMITS.max}" step="0.05" value="${this.state.chromaScale}" />
+          <input data-action="chroma-scale" type="range" min="${CHROMA_BILLBOARD_SCALE_LIMITS.min}" max="${CHROMA_BILLBOARD_SCALE_LIMITS.max}" step="0.05" value="${prepState.scale}" />
         </label>
         <label class="chroma-control">
           <span>
             Height
-            <output data-chroma-value="height">${this.state.chromaHeight.toFixed(2)}</output>
+            <output data-chroma-value="height">${prepState.height.toFixed(2)}</output>
           </span>
-          <input data-action="chroma-height" type="range" min="${CHROMA_BILLBOARD_HEIGHT_LIMITS.min}" max="${CHROMA_BILLBOARD_HEIGHT_LIMITS.max}" step="0.05" value="${this.state.chromaHeight}" />
+          <input data-action="chroma-height" type="range" min="${CHROMA_BILLBOARD_HEIGHT_LIMITS.min}" max="${CHROMA_BILLBOARD_HEIGHT_LIMITS.max}" step="0.05" value="${prepState.height}" />
         </label>
         <label class="chroma-control">
           <span>Playback</span>
           <select data-action="chroma-playback">
-            <option value="loop" ${this.state.chromaPlaybackMode === "loop" ? "selected" : ""}>Loop continuously</option>
-            <option value="once" ${this.state.chromaPlaybackMode === "once" ? "selected" : ""}>Play once beginning to end</option>
+            <option value="loop" ${prepState.playbackMode === "loop" ? "selected" : ""}>Loop continuously</option>
+            <option value="once" ${prepState.playbackMode === "once" ? "selected" : ""}>Play once beginning to end</option>
           </select>
         </label>
         ${this.renderChromaSlider("similarity", "Key threshold", 0.01)}
@@ -536,6 +604,8 @@ export class ClassroomApp {
         ${this.renderChromaSlider("brightness", "Brightness", 0.01)}
         ${this.renderChromaSlider("contrast", "Contrast", 0.01)}
         <div class="chroma-panel-actions">
+          <button class="secondary-button" data-action="play-selected-video">Play</button>
+          <button class="secondary-button" data-action="pause-selected-video">Pause</button>
           <button class="secondary-button" data-action="restart-chroma">Play From Start</button>
           <button class="secondary-button" data-action="reset-chroma">Reset</button>
           <button class="secondary-button" data-action="hide-chroma">Hide Video</button>
@@ -544,9 +614,30 @@ export class ClassroomApp {
     `;
   }
 
+  private renderSelectedPartMarkerStateControl(): string {
+    const part = this.state.selectedPart;
+    if (!part?.videoUrl) {
+      return "";
+    }
+
+    const activationMode = this.getPartVideoActivationMode(part);
+    const state = this.getVideoPrepState(part).markerState;
+    const label = activationMode === "student" ? "Student access" : "Video visibility";
+    return `
+      <label class="chroma-control">
+        <span>${label}</span>
+        <select data-action="part-marker-state" data-part-id="${part.id}">
+          <option value="green" ${state === "green" ? "selected" : ""}>Green: visible</option>
+          <option value="orange" ${state === "orange" ? "selected" : ""}>Orange: teacher only</option>
+          <option value="red" ${state === "red" ? "selected" : ""}>Red: hidden</option>
+        </select>
+      </label>
+    `;
+  }
+
   private renderChromaSlider(key: ChromaSettingKey, label: string, step: number): string {
     const limits = CHROMA_KEY_SETTING_LIMITS[key];
-    const value = this.state.chromaSettings[key];
+    const value = this.getCurrentChromaPanelState().settings[key];
     return `
       <label class="chroma-control">
         <span>
@@ -602,7 +693,22 @@ export class ClassroomApp {
         if (command === "start-experience") {
           this.applyTeacherCommand(command);
         }
+        if (command === "play-introduction") {
+          const teacherVideoPart = this.getTeacherVideoPart();
+          if (teacherVideoPart) {
+            this.state.selectedPart = teacherVideoPart;
+            this.state.chromaPanelOpen = true;
+            this.setVideoPrepState(teacherVideoPart, {
+              ...this.getVideoPrepState(teacherVideoPart),
+              playbackPaused: false,
+              markerState: "green"
+            });
+          }
+        }
         this.socket.sendTeacherCommand(command);
+        if (command === "play-introduction") {
+          this.render();
+        }
       });
     });
 
@@ -610,10 +716,33 @@ export class ClassroomApp {
       button.addEventListener("click", () => this.handleAction(button.dataset.action ?? ""));
     });
 
+    const participantNameInput = this.root.querySelector<HTMLInputElement>("#participant-name");
+    if (participantNameInput) {
+      participantNameInput.value = this.state.name;
+      participantNameInput.addEventListener("input", () => {
+        this.state.name = this.normalizeParticipantName(participantNameInput.value, true);
+      });
+      participantNameInput.addEventListener("pointerup", () => {
+        this.focusTextInput(participantNameInput);
+      });
+      participantNameInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          participantNameInput.blur();
+        }
+      });
+    }
+
     this.root.querySelectorAll<HTMLElement>("[data-code-key]").forEach((button) => {
       button.addEventListener("click", () => {
         const character = button.dataset.codeKey ?? "";
         this.appendJoinCodeCharacter(character);
+      });
+    });
+
+    this.root.querySelectorAll<HTMLElement>("[data-name-key]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const character = button.dataset.nameKey ?? "";
+        this.appendNameCharacter(character);
       });
     });
 
@@ -634,12 +763,20 @@ export class ClassroomApp {
 
     this.root.querySelectorAll<HTMLInputElement>('input[data-action="object-scale"]').forEach((input) => {
       input.addEventListener("input", () => {
+        if (this.state.modelTransformLocked) {
+          input.value = String(this.state.socket.objectScale);
+          return;
+        }
         this.socket.setObjectScale(Number(input.value));
       });
     });
 
     this.root.querySelectorAll<HTMLSelectElement>('select[data-action="object-marker-state"]').forEach((select) => {
       select.addEventListener("change", () => this.handleObjectMarkerStateInput(select));
+    });
+
+    this.root.querySelectorAll<HTMLSelectElement>('select[data-action="part-marker-state"]').forEach((select) => {
+      select.addEventListener("change", () => this.handlePartMarkerStateInput(select));
     });
 
     this.root.querySelectorAll<HTMLInputElement>('input[data-action="chroma-setting"]').forEach((input) => {
@@ -684,7 +821,7 @@ export class ClassroomApp {
         this.state.joinCode = input.value.trim().toUpperCase();
       }
       if (this.state.selectedExperience && this.state.role) {
-        this.socket.joinSession(this.state.joinCode, this.state.selectedExperience.id, this.state.role, this.state.name || "Student");
+        this.socket.joinSession(this.state.joinCode, this.state.selectedExperience.id, this.state.role, this.state.name || "Student", this.getLocalParticipantDeviceKind());
       }
       this.render();
       return;
@@ -692,9 +829,26 @@ export class ClassroomApp {
 
     if (action === "create-teacher-session") {
       if (this.state.selectedExperience && this.state.role === "teacher") {
-        this.socket.createSession(this.state.selectedExperience.id, this.state.name || "Teacher");
+        this.socket.createSession(this.state.selectedExperience.id, this.state.name || "Teacher", this.getLocalParticipantDeviceKind());
         this.loadSelectedExperience(this.state.mode, true);
       }
+      this.render();
+      return;
+    }
+
+    if (action === "edit-name") {
+      this.promptForParticipantName();
+      return;
+    }
+
+    if (action === "name-backspace") {
+      this.state.name = this.state.name.slice(0, -1);
+      this.render();
+      return;
+    }
+
+    if (action === "name-clear") {
+      this.state.name = "";
       this.render();
       return;
     }
@@ -726,6 +880,13 @@ export class ClassroomApp {
 
     if (action === "clear-spawn-suggestion") {
       this.state.spawnSuggestion = undefined;
+      this.render();
+      return;
+    }
+
+    if (action === "toggle-model-lock") {
+      this.state.modelTransformLocked = !this.state.modelTransformLocked;
+      this.scene?.setModelTransformLocked(this.state.modelTransformLocked);
       this.render();
       return;
     }
@@ -776,6 +937,17 @@ export class ClassroomApp {
     }
 
     if (action === "hide-chroma") {
+      const selectedVideoPart = this.getSelectedVideoPart();
+      if (selectedVideoPart) {
+        this.setVideoPrepState(selectedVideoPart, {
+          ...this.getVideoPrepState(selectedVideoPart),
+          playbackPaused: true,
+          markerState: "red"
+        });
+        this.state.chromaPanelOpen = false;
+        this.render();
+        return;
+      }
       this.state.chromaPanelOpen = false;
       this.scene?.hideChromaBillboard();
       if (this.state.role === "teacher" && this.state.socket.code) {
@@ -786,6 +958,19 @@ export class ClassroomApp {
     }
 
     if (action === "reset-chroma") {
+      const selectedVideoPart = this.getSelectedVideoPart();
+      if (selectedVideoPart) {
+        const current = this.getVideoPrepState(selectedVideoPart);
+        this.setVideoPrepState(selectedVideoPart, {
+          ...this.createDefaultVideoPrepState(selectedVideoPart),
+          markerState: current.markerState,
+          playbackRevision: current.playbackRevision,
+          playbackPaused: true
+        });
+        this.scene?.pausePartVideo(selectedVideoPart.id);
+        this.render();
+        return;
+      }
       this.state.chromaSettings = { ...DEFAULT_CHROMA_KEY_SETTINGS };
       this.state.chromaScale = 1;
       this.state.chromaHeight = 1.4;
@@ -803,12 +988,55 @@ export class ClassroomApp {
     }
 
     if (action === "restart-chroma") {
+      const selectedVideoPart = this.getSelectedVideoPart();
+      if (selectedVideoPart) {
+        const current = this.getVideoPrepState(selectedVideoPart);
+        this.setVideoPrepState(selectedVideoPart, {
+          ...current,
+          playbackRevision: current.playbackRevision + 1,
+          playbackPaused: false
+        });
+        this.scene?.playPartVideo(selectedVideoPart.id, true, this.state.role !== "teacher");
+        this.render();
+        return;
+      }
       this.state.chromaPlaybackRevision += 1;
+      if (this.state.role === "teacher" && this.state.selectedPart?.videoUrl && this.scene?.restartSelectedPartVideo()) {
+        return;
+      }
       this.scene?.setChromaBillboardState(this.buildChromaBillboardState(true));
       this.state.chromaPosition = this.scene?.getChromaBillboardState(true).position ?? this.state.chromaPosition;
       if (this.state.role === "teacher" && this.state.socket.code) {
         this.socket.setChromaBillboard(this.buildChromaBillboardState(true));
       }
+      return;
+    }
+
+    if (action === "play-selected-video") {
+      const selectedVideoPart = this.getSelectedVideoPart();
+      if (this.state.role === "teacher" && selectedVideoPart) {
+        this.setVideoPrepState(selectedVideoPart, {
+          ...this.getVideoPrepState(selectedVideoPart),
+          playbackPaused: false
+        });
+        this.scene?.playPartVideo(selectedVideoPart.id, false, false);
+        return;
+      }
+      this.scene?.restartChromaBillboard();
+      return;
+    }
+
+    if (action === "pause-selected-video") {
+      const selectedVideoPart = this.getSelectedVideoPart();
+      if (this.state.role === "teacher" && selectedVideoPart) {
+        this.setVideoPrepState(selectedVideoPart, {
+          ...this.getVideoPrepState(selectedVideoPart),
+          playbackPaused: true
+        });
+        this.scene?.pausePartVideo(selectedVideoPart.id);
+        return;
+      }
+      this.scene?.pauseChromaBillboard();
       return;
     }
   }
@@ -819,12 +1047,17 @@ export class ClassroomApp {
         container,
         onMarkerSelected: (part) => {
           this.state.selectedPart = part;
+          if (this.state.role === "teacher" && part.videoUrl) {
+            this.setVideoPrepState(part, this.getVideoPrepState(part), false);
+            this.state.chromaPanelOpen = true;
+          }
           this.render();
         },
         onChromaMarkerSelected: () => {
           if (this.state.role !== "teacher") {
             return;
           }
+          this.state.selectedPart = undefined;
           this.state.chromaPanelOpen = true;
           this.scene?.setChromaBillboardState(this.buildChromaBillboardState(true));
           if (this.state.socket.code) {
@@ -840,20 +1073,32 @@ export class ClassroomApp {
           this.socket.setAnimationStep(nextStep);
         },
         onScaleStep: (direction) => {
+          if (this.state.modelTransformLocked) {
+            return;
+          }
           const nextScale = Math.min(2, Math.max(0.25, this.state.socket.objectScale + direction * 0.1));
           this.socket.setObjectScale(nextScale);
         },
         onObjectScaleChange: (scale) => {
-          if (this.state.role === "teacher") {
+          if (this.state.role === "teacher" && !this.state.modelTransformLocked) {
             this.socket.setObjectScale(scale);
           }
         },
         onModelPositionChange: (position) => {
-          if (this.state.role === "teacher") {
+          if (this.state.role === "teacher" && !this.state.modelTransformLocked) {
             this.socket.setModelPosition(position);
           }
         },
         onPartMarkerPositionChange: (partId, position) => {
+          const part = this.getPartById(partId);
+          if (part?.videoUrl && this.state.role === "teacher") {
+            this.setVideoPrepState(part, {
+              ...this.getVideoPrepState(part),
+              position,
+              height: normalizeChromaHeight(position[1])
+            });
+            return;
+          }
           this.socket.setPartMarkerPosition(partId, position);
         },
         onChromaTransformChange: (position, scale) => {
@@ -893,26 +1138,40 @@ export class ClassroomApp {
         }
       });
       this.scene.setRole(this.state.role);
+      this.scene.setModelTransformLocked(this.state.modelTransformLocked);
       this.scene.setLocalParticipantId(this.state.socket.participantId);
     } else if (!container.contains(this.scene.domElement)) {
       container.append(this.scene.domElement);
     }
     this.scene.refreshViewport();
+    this.scene.setModelTransformLocked(this.state.modelTransformLocked);
     this.scene.setLocalParticipantId(this.state.socket.participantId);
     this.scene.setParticipants(this.state.socket.participants, this.state.socket.participantId);
 
   }
 
-  private applyTeacherCommand(command: ClientCommand): void {
+  private applyTeacherCommand(command: ClientCommand): boolean {
     if (command === "start-experience") {
       this.scene?.startExperience();
+      return Boolean(this.scene);
     }
     if (command === "shell-off") {
       this.scene?.setShellVisible(false);
+      return Boolean(this.scene);
     }
     if (command === "play-introduction") {
-      this.scene?.playIntroduction(this.state.selectedExperience?.introVideos.default);
+      this.scene?.startExperience();
+      const teacherVideoPart = this.getTeacherVideoPart();
+      if (teacherVideoPart?.videoUrl && this.scene?.playPartVideo(teacherVideoPart.id, true, this.state.role !== "teacher")) {
+        return true;
+      }
+      if (!this.scene || !this.state.selectedExperience?.introVideos.default) {
+        return false;
+      }
+      this.scene.playIntroduction(this.state.selectedExperience.introVideos.default);
+      return true;
     }
+    return true;
   }
 
   private applySharedState(): void {
@@ -924,11 +1183,26 @@ export class ClassroomApp {
       this.scene?.setModelPosition(this.state.socket.modelPosition);
     }
     this.scene?.setChromaBillboardState(this.state.socket.chromaBillboard);
+    this.scene?.setVideoPrepStates(this.state.socket.code ? this.state.socket.videoPrepStates : this.state.videoPrepStates);
     this.scene?.setObjectMarkerStates(this.state.socket.objectMarkerStates);
     this.scene?.setMarkersVisible(this.state.socket.commands["reveal-markers"]);
     this.scene?.setPartMarkerPositions(this.state.socket.partMarkerPositions);
+    this.scene?.setPartMarkerStates(this.state.socket.partMarkerStates);
     if (this.state.socket.commands["start-experience"]) {
       this.scene?.startExperience();
+    }
+    this.flushPendingTeacherCommands();
+  }
+
+  private flushPendingTeacherCommands(): void {
+    if (!this.scene || this.pendingTeacherCommands.size === 0) {
+      return;
+    }
+
+    for (const command of [...this.pendingTeacherCommands]) {
+      if (this.applyTeacherCommand(command)) {
+        this.pendingTeacherCommands.delete(command);
+      }
     }
   }
 
@@ -974,6 +1248,7 @@ export class ClassroomApp {
       if (shouldAutoStart || this.state.socket.commands["start-experience"]) {
         this.scene?.startExperience();
       }
+      this.flushPendingTeacherCommands();
     });
   }
 
@@ -1004,9 +1279,14 @@ export class ClassroomApp {
       chromaPanelOpen: false,
       chromaPosition: null,
       chromaHeight: initialChromaMemory.height,
-      chromaPlaybackRevision: 0
+      chromaPlaybackRevision: 0,
+      partMarkerPositions: {},
+      partMarkerStates: {},
+      videoPrepStates: initialVideoPrepMemory,
+      modelTransformLocked: false
     };
     this.loadedSceneKey = undefined;
+    this.videoPrepBootstrapSessionCode = undefined;
   }
 
   private selectExperience(experience: ExperienceConfig): void {
@@ -1016,7 +1296,22 @@ export class ClassroomApp {
 
   private updateNameFromInput(): void {
     const input = this.root.querySelector<HTMLInputElement>("#participant-name");
-    this.state.name = input?.value.trim() ?? "";
+    this.state.name = this.normalizeParticipantName(input?.value ?? "");
+  }
+
+  private promptForParticipantName(): void {
+    const nextName = window.prompt("Name", this.state.name || "");
+    if (nextName === null) {
+      return;
+    }
+
+    this.state.name = this.normalizeParticipantName(nextName);
+    this.render();
+  }
+
+  private focusTextInput(input: HTMLInputElement): void {
+    input.focus({ preventScroll: true });
+    input.select?.();
   }
 
   private applyInputFocus(): void {
@@ -1037,8 +1332,7 @@ export class ClassroomApp {
 
     if (!this.state.capabilities.touch) {
       requestAnimationFrame(() => {
-        input.focus({ preventScroll: true });
-        input.select?.();
+        this.focusTextInput(input);
       });
     }
   }
@@ -1052,9 +1346,41 @@ export class ClassroomApp {
     this.render();
   }
 
+  private appendNameCharacter(character: string): void {
+    if (!character || this.state.name.length >= MAX_PARTICIPANT_NAME_LENGTH) {
+      return;
+    }
+
+    const nextName = character === " "
+      ? `${this.state.name} `
+      : `${this.state.name}${character.toUpperCase()}`;
+    this.state.name = this.normalizeParticipantName(nextName, true);
+    this.render();
+  }
+
+  private normalizeParticipantName(value: string, preserveTrailingSpace = false): string {
+    const compact = value
+      .replace(/[^A-Za-z0-9 -]/g, "")
+      .replace(/\s+/g, " ")
+      .slice(0, MAX_PARTICIPANT_NAME_LENGTH);
+    return preserveTrailingSpace ? compact : compact.trim();
+  }
+
   private handleChromaSettingInput(input: HTMLInputElement): void {
     const key = input.dataset.chromaSetting as ChromaSettingKey | undefined;
     if (!key || !(key in DEFAULT_CHROMA_KEY_SETTINGS)) {
+      return;
+    }
+
+    const selectedVideoPart = this.getSelectedVideoPart();
+    if (selectedVideoPart) {
+      const current = this.getVideoPrepState(selectedVideoPart);
+      const settings = normalizeChromaKeySettings({
+        ...current.settings,
+        [key]: Number(input.value)
+      });
+      this.setVideoPrepState(selectedVideoPart, { ...current, settings });
+      this.root.querySelector<HTMLOutputElement>(`[data-chroma-value="${key}"]`)?.replaceChildren(settings[key].toFixed(2));
       return;
     }
 
@@ -1063,9 +1389,14 @@ export class ClassroomApp {
       [key]: Number(input.value)
     });
     this.saveChromaMemory();
-    this.scene?.setChromaSettings(this.state.chromaSettings);
+    const handledPartVideo = this.state.role === "teacher" && Boolean(this.state.selectedPart?.videoUrl)
+      ? this.scene?.setSelectedPartVideoChromaSettings(this.state.chromaSettings)
+      : false;
+    if (!handledPartVideo) {
+      this.scene?.setChromaSettings(this.state.chromaSettings);
+    }
     this.root.querySelector<HTMLOutputElement>(`[data-chroma-value="${key}"]`)?.replaceChildren(this.state.chromaSettings[key].toFixed(2));
-    if (this.state.role === "teacher" && this.state.socket.code) {
+    if (!handledPartVideo && this.state.role === "teacher" && this.state.socket.code) {
       this.socket.setChromaBillboard(this.buildChromaBillboardState(true));
     }
   }
@@ -1083,37 +1414,216 @@ export class ClassroomApp {
     }
   }
 
+  private handlePartMarkerStateInput(select: HTMLSelectElement): void {
+    const partId = select.dataset.partId;
+    const state = normalizeObjectMarkerState(select.value);
+    if (!partId) {
+      return;
+    }
+
+    const part = this.getPartById(partId);
+    if (part?.videoUrl && this.state.role === "teacher") {
+      this.setVideoPrepState(part, {
+        ...this.getVideoPrepState(part),
+        markerState: state
+      });
+      this.render();
+      return;
+    }
+
+    this.scene?.setPartMarkerState(partId, state);
+    if (this.state.role === "teacher") {
+      this.socket.setPartMarkerState(partId, state);
+    }
+  }
+
   private handleChromaScaleInput(input: HTMLInputElement): void {
+    const selectedVideoPart = this.getSelectedVideoPart();
+    if (selectedVideoPart) {
+      const scale = normalizeChromaScale(Number(input.value));
+      this.setVideoPrepState(selectedVideoPart, {
+        ...this.getVideoPrepState(selectedVideoPart),
+        scale
+      });
+      this.root.querySelector<HTMLOutputElement>('[data-chroma-value="scale"]')?.replaceChildren(scale.toFixed(2));
+      return;
+    }
+
     this.state.chromaScale = normalizeChromaScale(Number(input.value));
     this.saveChromaMemory();
-    this.scene?.setChromaBillboardScale(this.state.chromaScale);
+    const handledPartVideo = this.state.role === "teacher" && Boolean(this.state.selectedPart?.videoUrl)
+      ? this.scene?.setSelectedPartVideoScale(this.state.chromaScale)
+      : false;
+    if (!handledPartVideo) {
+      this.scene?.setChromaBillboardScale(this.state.chromaScale);
+    }
     this.root.querySelector<HTMLOutputElement>('[data-chroma-value="scale"]')?.replaceChildren(this.state.chromaScale.toFixed(2));
-    if (this.state.role === "teacher" && this.state.socket.code) {
+    if (!handledPartVideo && this.state.role === "teacher" && this.state.socket.code) {
       this.socket.setChromaBillboard(this.buildChromaBillboardState(true));
     }
   }
 
   private handleChromaHeightInput(input: HTMLInputElement): void {
+    const selectedVideoPart = this.getSelectedVideoPart();
+    if (selectedVideoPart) {
+      const current = this.getVideoPrepState(selectedVideoPart);
+      const height = normalizeChromaHeight(Number(input.value));
+      const position = current.position
+        ? [current.position[0], height, current.position[2]] as Vector3Tuple
+        : [selectedVideoPart.markerPosition[0], height, selectedVideoPart.markerPosition[2]] as Vector3Tuple;
+      this.setVideoPrepState(selectedVideoPart, {
+        ...current,
+        position,
+        height
+      });
+      this.root.querySelector<HTMLOutputElement>('[data-chroma-value="height"]')?.replaceChildren(height.toFixed(2));
+      return;
+    }
+
     this.state.chromaHeight = normalizeChromaHeight(Number(input.value));
     this.saveChromaMemory();
-    this.scene?.setChromaBillboardHeight(this.state.chromaHeight);
-    this.state.chromaPosition = this.scene?.getChromaBillboardState(true).position ?? this.state.chromaPosition;
+    const handledPartVideo = this.state.role === "teacher" && Boolean(this.state.selectedPart?.videoUrl)
+      ? this.scene?.setSelectedPartVideoHeight(this.state.chromaHeight)
+      : false;
+    if (!handledPartVideo) {
+      this.scene?.setChromaBillboardHeight(this.state.chromaHeight);
+      this.state.chromaPosition = this.scene?.getChromaBillboardState(true).position ?? this.state.chromaPosition;
+    }
     this.root.querySelector<HTMLOutputElement>('[data-chroma-value="height"]')?.replaceChildren(this.state.chromaHeight.toFixed(2));
-    if (this.state.role === "teacher" && this.state.socket.code) {
+    if (!handledPartVideo && this.state.role === "teacher" && this.state.socket.code) {
       this.socket.setChromaBillboard(this.buildChromaBillboardState(true));
     }
   }
 
   private handleChromaPlaybackInput(select: HTMLSelectElement): void {
     const nextMode: ChromaPlaybackMode = select.value === "once" ? "once" : "loop";
+    const selectedVideoPart = this.getSelectedVideoPart();
+    if (selectedVideoPart) {
+      const current = this.getVideoPrepState(selectedVideoPart);
+      this.setVideoPrepState(selectedVideoPart, {
+        ...current,
+        playbackMode: nextMode,
+        playbackRevision: nextMode !== current.playbackMode ? current.playbackRevision + 1 : current.playbackRevision
+      });
+      return;
+    }
+
     if (nextMode !== this.state.chromaPlaybackMode) {
       this.state.chromaPlaybackRevision += 1;
     }
     this.state.chromaPlaybackMode = nextMode;
     this.saveChromaMemory();
     this.scene?.setChromaBillboardState(this.buildChromaBillboardState(true));
-    if (this.state.role === "teacher" && this.state.socket.code) {
+    if (!(this.state.role === "teacher" && this.state.selectedPart?.videoUrl) && this.state.role === "teacher" && this.state.socket.code) {
       this.socket.setChromaBillboard(this.buildChromaBillboardState(true));
+    }
+  }
+
+  private getSelectedVideoPart(): ExperiencePartConfig | undefined {
+    return this.state.selectedPart?.videoUrl ? this.state.selectedPart : undefined;
+  }
+
+  private getPartById(partId: string): ExperiencePartConfig | undefined {
+    return this.state.selectedExperience?.parts.find((part) => part.id === partId);
+  }
+
+  private getTeacherVideoPart(): ExperiencePartConfig | undefined {
+    return this.state.selectedExperience?.parts.find((part) =>
+      Boolean(part.videoUrl) && this.getPartVideoActivationMode(part) === "teacher"
+    );
+  }
+
+  private getCurrentChromaPanelState(): VideoPrepState {
+    const selectedVideoPart = this.getSelectedVideoPart();
+    if (selectedVideoPart) {
+      return this.getVideoPrepState(selectedVideoPart);
+    }
+
+    return normalizeVideoPrepState({
+      settings: this.state.chromaSettings,
+      position: this.state.chromaPosition,
+      scale: this.state.chromaScale,
+      height: this.state.chromaHeight,
+      playbackMode: this.state.chromaPlaybackMode,
+      playbackRevision: this.state.chromaPlaybackRevision,
+      markerState: this.state.socket.objectMarkerStates.chroma
+    });
+  }
+
+  private getVideoPrepState(part: ExperiencePartConfig): VideoPrepState {
+    const current = this.state.videoPrepStates[part.id];
+    const socketState = this.state.socket.videoPrepStates[part.id];
+    const sessionState = this.state.socket.code
+      ? socketState ?? (this.state.role === "teacher" ? current : undefined)
+      : current;
+    const base = normalizeVideoPrepState({
+      ...this.createDefaultVideoPrepState(part),
+      ...(sessionState ?? {})
+    });
+    return {
+      ...base,
+      settings: normalizeChromaKeySettings(base.settings),
+      position: base.position ?? part.markerPosition,
+      height: base.position?.[1] ?? base.height
+    };
+  }
+
+  private createDefaultVideoPrepState(part: ExperiencePartConfig): VideoPrepState {
+    const activationMode = this.getPartVideoActivationMode(part);
+    return normalizeVideoPrepState({
+      settings: { ...DEFAULT_CHROMA_KEY_SETTINGS },
+      position: part.markerPosition,
+      scale: 1,
+      height: part.markerPosition[1],
+      playbackMode: activationMode === "student" ? "once" : "loop",
+      playbackRevision: 0,
+      playbackPaused: false,
+      markerState: this.state.socket.partMarkerStates[part.id] ?? "green"
+    });
+  }
+
+  private setVideoPrepState(part: ExperiencePartConfig, nextState: VideoPrepState, sync = true): void {
+    const normalizedState = normalizeVideoPrepState({
+      ...nextState,
+      position: nextState.position ?? part.markerPosition,
+      height: nextState.position?.[1] ?? nextState.height
+    });
+    this.state.videoPrepStates = {
+      ...this.state.videoPrepStates,
+      [part.id]: normalizedState
+    };
+    this.saveVideoPrepMemory();
+    this.scene?.setVideoPrepState(part.id, normalizedState);
+    if (this.state.role === "teacher" && sync && this.state.socket.code) {
+      this.socket.setVideoPrepState(part.id, normalizedState);
+    }
+  }
+
+  private bootstrapTeacherVideoPrepState(): void {
+    if (this.state.role !== "teacher" || !this.state.socket.code || !this.state.selectedExperience) {
+      return;
+    }
+    if (this.videoPrepBootstrapSessionCode === this.state.socket.code) {
+      return;
+    }
+
+    this.videoPrepBootstrapSessionCode = this.state.socket.code;
+    for (const part of this.state.selectedExperience.parts) {
+      if (!part.videoUrl || this.state.socket.videoPrepStates[part.id]) {
+        continue;
+      }
+
+      const state = normalizeVideoPrepState({
+        ...this.getVideoPrepState(part),
+        markerState: this.state.socket.partMarkerStates[part.id] ?? "green",
+        playbackPaused: false
+      });
+      this.state.videoPrepStates = {
+        ...this.state.videoPrepStates,
+        [part.id]: state
+      };
+      this.scene?.setVideoPrepState(part.id, state);
+      this.socket.setVideoPrepState(part.id, state);
     }
   }
 
@@ -1153,6 +1663,10 @@ export class ClassroomApp {
       height: this.state.chromaHeight,
       playbackMode: this.state.chromaPlaybackMode
     });
+  }
+
+  private saveVideoPrepMemory(): void {
+    savePersistentVideoPrepMemory(this.state.videoPrepStates);
   }
 
   private captureViewSuggestion(): void {
@@ -1225,6 +1739,31 @@ function savePersistentChromaMemory(memory: PersistentChromaMemory): void {
       height: normalizeChromaHeight(memory.height),
       playbackMode: memory.playbackMode === "once" ? "once" : "loop"
     }));
+  } catch {
+    // Storage can be unavailable in private browsing or locked-down tablets.
+  }
+}
+
+function loadPersistentVideoPrepMemory(): VideoPrepStates {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const raw = window.localStorage.getItem(VIDEO_PREP_SETTINGS_STORAGE_KEY);
+    return raw ? normalizeVideoPrepStates(JSON.parse(raw) as unknown) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePersistentVideoPrepMemory(states: VideoPrepStates): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(VIDEO_PREP_SETTINGS_STORAGE_KEY, JSON.stringify(normalizeVideoPrepStates(states)));
   } catch {
     // Storage can be unavailable in private browsing or locked-down tablets.
   }

@@ -23,18 +23,24 @@ import {
   normalizeChromaScale,
   normalizeObjectMarkerState,
   normalizeObjectMarkerStates,
+  normalizeVideoPrepState,
+  normalizeVideoPrepStates,
   type ChromaBillboardState,
   type ChromaKeySettings,
   type ChromaPlaybackMode,
   type ClientCommand,
   type ObjectMarkerState,
   type ObjectMarkerStates,
+  type PartMarkerStates,
   type Participant,
+  type ParticipantDeviceKind,
   type ParticipantPresence,
   type PresenceJoint,
   type Role,
   type SceneObjectId,
-  type Vector3Tuple
+  type Vector3Tuple,
+  type VideoPrepState,
+  type VideoPrepStates
 } from "../net/protocol";
 
 interface SceneOptions {
@@ -118,9 +124,23 @@ interface RemoteParticipantVisual {
   root: THREE.Group;
   headAnchor: THREE.Group;
   headModel: THREE.Object3D;
-  leftController: THREE.Mesh;
-  rightController: THREE.Mesh;
+  leftController: THREE.Group;
+  rightController: THREE.Group;
   label: THREE.Mesh;
+  labelText: string;
+  deviceKind: ParticipantDeviceKind;
+}
+
+interface PartVideoPreview {
+  mesh: THREE.Mesh;
+  video: HTMLVideoElement;
+  texture: THREE.VideoTexture;
+  material: THREE.ShaderMaterial;
+}
+
+interface PartVideoPlaybackOptions {
+  autoPlay?: boolean;
+  muted?: boolean;
 }
 
 const uiButtonTextures: Partial<Record<XrButtonAction, string>> = {
@@ -159,10 +179,11 @@ const TELEPORT_ARC_STEP_SECONDS = 0.05;
 const TELEPORT_ARC_SPEED = 8.2;
 const TELEPORT_ARC_GRAVITY = -7.5;
 const DESKTOP_MOVE_SPEED = 2.2;
-const DESKTOP_RUN_MULTIPLIER = 1.8;
+const DESKTOP_RUN_MULTIPLIER = 3.6;
 const DESKTOP_TURN_SPEED = 1.8;
 const DESKTOP_LOOK_SENSITIVITY = 0.003;
 const DESKTOP_MAX_PITCH = Math.PI / 2 - 0.08;
+const DESKTOP_INSPECT_MOUSE_PIVOT_DISTANCE = 2.8;
 const TOUCH_LOOK_SENSITIVITY = 0.004;
 const TOUCH_MOVE_SENSITIVITY = 0.0065;
 const TOUCH_PINCH_SENSITIVITY = 0.01;
@@ -215,18 +236,56 @@ const DESKTOP_WHEEL_DISTANCE_SPEED = 0.0025;
 const DESKTOP_MIN_OBJECT_DISTANCE = 0.35;
 const DESKTOP_MAX_OBJECT_DISTANCE = 14;
 const CHROMA_DANCER_VIDEO_URL = "/assets/chroma/cessna-green-screen.mp4";
-const PARTICIPANT_HEADSET_ASSET_URL = "/assets/avatars/vr-goggles/scene.gltf";
+const PARTICIPANT_HEADSET_ASSET_URL = "/assets/avatars/vr-hmd/vr-hmd.glb";
+const PARTICIPANT_HEADSET_TARGET_SIZE = 0.42;
 const PARTICIPANT_PRESENCE_SYNC_INTERVAL_MS = 100;
+const REMOTE_HEAD_MIN_VISIBLE_HEIGHT = 0.45;
+const REMOTE_HEAD_FROM_HAND_OFFSET = 0.55;
+const REMOTE_HEAD_DEFAULT_HEIGHT = 1.55;
+const REMOTE_HEAD_MAX_HAND_DISTANCE = 1.85;
+const REMOTE_HEAD_MAX_HAND_VERTICAL_GAP = 1.35;
+const REMOTE_CONTROLLER_FALLBACK_DOWN = 0.42;
+const REMOTE_CONTROLLER_FALLBACK_FORWARD = 0.18;
+const REMOTE_CONTROLLER_FALLBACK_SIDE = 0.24;
+const REMOTE_PARTICIPANT_SPAWN_DISTANCE = 4;
+const REMOTE_PARTICIPANT_SPAWN_SPREAD = 1.35;
+const REMOTE_PARTICIPANT_SPAWN_HEAD_HEIGHT = 1.6;
+const REMOTE_PARTICIPANT_SPAWN_CONTROLLER_HEIGHT = 1.08;
+const REMOTE_PARTICIPANT_SPAWN_CONTROLLER_FORWARD = -0.26;
+const REMOTE_PARTICIPANT_SPAWN_CONTROLLER_SIDE = 0.28;
+const REMOTE_PARTICIPANT_MAX_HAND_OFFSET = 0.9;
+const REMOTE_PARTICIPANT_LABEL_OFFSET = 0.5;
 const KEYED_PERSON_TARGET_HEIGHT_METERS = 1.85;
 const KEYED_VIDEO_SOURCE_WIDTH = 716;
 const KEYED_VIDEO_SOURCE_HEIGHT = 1284;
 const PORTRAIT_VIDEO_HEIGHT = KEYED_PERSON_TARGET_HEIGHT_METERS;
 const PORTRAIT_VIDEO_WIDTH = PORTRAIT_VIDEO_HEIGHT * (KEYED_VIDEO_SOURCE_WIDTH / KEYED_VIDEO_SOURCE_HEIGHT);
+const PART_VIDEO_DEFAULT_HEIGHT = 1.6;
+const PART_VIDEO_DEFAULT_WIDTH = PART_VIDEO_DEFAULT_HEIGHT * 9 / 16;
+const PART_MARKER_RADIUS = 0.18;
+const MIN_PLANE_GEOMETRY_SIZE = 0.001;
 
 type ObjectRotationAxis = "yaw" | "pitch" | "roll";
 type DesktopGrabTarget = "model" | "chroma";
 type DesktopGrabMode = "free" | "distance";
 type TouchPoint = { x: number; y: number };
+
+function finitePositive(value: number, fallback: number): number {
+  if (Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (Number.isFinite(fallback) && fallback > 0) {
+    return fallback;
+  }
+  return MIN_PLANE_GEOMETRY_SIZE;
+}
+
+function createFinitePlaneGeometry(width: number, height: number, fallbackWidth = 1, fallbackHeight = fallbackWidth): THREE.PlaneGeometry {
+  return new THREE.PlaneGeometry(
+    finitePositive(width, fallbackWidth),
+    finitePositive(height, fallbackHeight)
+  );
+}
 
 export class ExperienceScene {
   private readonly scene = new THREE.Scene();
@@ -281,10 +340,21 @@ export class ExperienceScene {
   private animationStep = 0;
   private modelBaseScale = 1;
   private objectScale = 1;
+  private modelTransformLocked = false;
   private introBillboard?: THREE.Mesh;
   private introVideo?: HTMLVideoElement;
   private introTexture?: THREE.VideoTexture;
   private introMaterial?: THREE.ShaderMaterial;
+  private partVideoBillboard?: THREE.Mesh;
+  private partVideo?: HTMLVideoElement;
+  private partVideoTexture?: THREE.VideoTexture;
+  private partVideoMaterial?: THREE.ShaderMaterial;
+  private activePartVideoPartId?: string;
+  private readonly partVideoPreviews = new Map<string, PartVideoPreview>();
+  private readonly partVideoSettings = new Map<string, ChromaKeySettings>();
+  private readonly videoPrepStates = new Map<string, VideoPrepState>();
+  private readonly videoPlaybackRevisions = new Map<string, number>();
+  private readonly videoPlaybackPausedStates = new Map<string, boolean>();
   private chromaMarker?: THREE.Mesh;
   private modelStateMarker?: THREE.Mesh;
   private readonly objectStateLabels = new Map<SceneObjectId, THREE.Mesh>();
@@ -303,6 +373,7 @@ export class ExperienceScene {
   private xrChromaPanelCanvas?: HTMLCanvasElement;
   private xrChromaPanelTexture?: THREE.CanvasTexture;
   private objectMarkerStates: ObjectMarkerStates = createDefaultObjectMarkerStates();
+  private partMarkerStates: PartMarkerStates = {};
   private modelObjectLabel = "Object";
   private chromaBillboardRequestedVisible = false;
   private localOrigin = new THREE.Matrix4();
@@ -351,6 +422,7 @@ export class ExperienceScene {
   private lastChromaTransformSync = 0;
   private readonly markersByPartId = new Map<string, THREE.Mesh>();
   private desktopGrabMarkerPartId?: string;
+  private selectedPartMarkerId?: string;
   private grabbedMarkerController?: THREE.Object3D;
   private grabbedMarkerPartId?: string;
   private grabbedMarkerDistance = 1.6;
@@ -521,6 +593,7 @@ export class ExperienceScene {
     }
     this.resetTabletControlsForExperience();
     this.createMarkers(experience.parts);
+    this.initializeVideoPrepStates(experience.parts);
     this.createModelStateMarker();
     this.createChromaMarker();
     this.applyObjectMarkerStates();
@@ -569,6 +642,8 @@ export class ExperienceScene {
     this.updateObjectStateLabels();
     this.applyObjectMarkerStates();
     this.updatePartMarkerVisibility();
+    this.updatePartMarkerMaterials();
+    this.updatePartVideoPreviewVisibility();
   }
 
   setLocalParticipantId(participantId?: string): void {
@@ -584,14 +659,15 @@ export class ExperienceScene {
       this.localParticipantId = localParticipantId;
     }
 
+    const visibleParticipants = participants
+      .filter((participant) => participant.id !== this.localParticipantId && Boolean(participant.presence))
+      .sort((first, second) => first.connectedAt - second.connectedAt || first.id.localeCompare(second.id));
+    const spawnedParticipants = visibleParticipants.filter((participant) => this.shouldUseRemoteParticipantSpawn(participant));
+    const spawnIndexes = new Map(spawnedParticipants.map((participant, index) => [participant.id, index]));
     const activeIds = new Set<string>();
-    for (const participant of participants) {
-      if (participant.id === this.localParticipantId || !participant.presence || !participant.calibrated) {
-        continue;
-      }
-
+    for (const participant of visibleParticipants) {
       activeIds.add(participant.id);
-      this.updateRemoteParticipant(participant);
+      this.updateRemoteParticipant(participant, spawnIndexes.get(participant.id) ?? -1, spawnedParticipants.length);
     }
 
     for (const [participantId, visual] of this.remoteParticipants) {
@@ -603,6 +679,10 @@ export class ExperienceScene {
       this.disposeRemoteParticipantVisual(visual);
       this.remoteParticipants.delete(participantId);
     }
+  }
+
+  private shouldUseRemoteParticipantSpawn(participant: Participant): boolean {
+    return this.role === "teacher" && participant.role === "student";
   }
 
   calibrateOrigin(): number[] {
@@ -635,7 +715,7 @@ export class ExperienceScene {
   }
 
   setObjectScale(scale: number): void {
-    if (!this.modelRoot) {
+    if (!this.modelRoot || this.modelTransformLocked) {
       return;
     }
 
@@ -691,6 +771,21 @@ export class ExperienceScene {
     }
   }
 
+  setModelTransformLocked(locked: boolean): void {
+    this.modelTransformLocked = locked;
+    if (!locked) {
+      return;
+    }
+
+    if (this.desktopGrabTarget === "model") {
+      this.desktopGrabActive = false;
+      this.desktopGrabTarget = undefined;
+      this.desktopGrabMode = "free";
+    }
+    this.grabbedModelController = undefined;
+    this.objectRotationActive = false;
+  }
+
   revealMarkers(): void {
     this.markersVisible = true;
     for (const marker of this.markers.keys()) {
@@ -714,6 +809,18 @@ export class ExperienceScene {
       const marker = this.markersByPartId.get(partId);
       if (marker) {
         marker.position.fromArray(position);
+        const prepState = this.videoPrepStates.get(partId);
+        if (prepState) {
+          this.videoPrepStates.set(partId, normalizeVideoPrepState({
+            ...prepState,
+            position,
+            height: position[1]
+          }));
+        }
+        this.positionPartVideoPreview(partId, marker);
+        if (partId === this.activePartVideoPartId) {
+          this.positionPartVideoBillboard(marker);
+        }
       }
     }
   }
@@ -724,6 +831,65 @@ export class ExperienceScene {
       [objectId]: normalizeObjectMarkerState(state)
     };
     this.applyObjectMarkerStates();
+  }
+
+  setPartMarkerStates(states: PartMarkerStates): void {
+    this.partMarkerStates = { ...states };
+    for (const [partId, state] of Object.entries(this.partMarkerStates)) {
+      const prepState = this.videoPrepStates.get(partId);
+      if (prepState) {
+        this.videoPrepStates.set(partId, normalizeVideoPrepState({ ...prepState, markerState: state }));
+        this.applyVideoPrepState(partId, this.videoPrepStates.get(partId) as VideoPrepState);
+      }
+    }
+    this.updatePartMarkerVisibility();
+    this.updatePartMarkerMaterials();
+  }
+
+  setPartMarkerState(partId: string, state: ObjectMarkerState): void {
+    const markerState = state === "orange" || state === "red" ? state : "green";
+    this.partMarkerStates = {
+      ...this.partMarkerStates,
+      [partId]: markerState
+    };
+    const prepState = this.videoPrepStates.get(partId);
+    if (prepState) {
+      const nextState = normalizeVideoPrepState({ ...prepState, markerState });
+      this.videoPrepStates.set(partId, nextState);
+      this.applyVideoPrepState(partId, nextState);
+    }
+    this.updatePartMarkerVisibility();
+    this.updatePartMarkerMaterials();
+  }
+
+  setVideoPrepStates(states: VideoPrepStates): void {
+    for (const [partId, state] of Object.entries(normalizeVideoPrepStates(states))) {
+      this.setVideoPrepState(partId, state);
+    }
+  }
+
+  setVideoPrepState(partId: string, state: VideoPrepState): void {
+    const prepState = normalizeVideoPrepState(state);
+    this.videoPrepStates.set(partId, prepState);
+    this.partVideoSettings.set(partId, prepState.settings);
+    this.partMarkerStates = {
+      ...this.partMarkerStates,
+      [partId]: prepState.markerState
+    };
+
+    const marker = this.markersByPartId.get(partId);
+    if (marker) {
+      if (prepState.position) {
+        marker.position.fromArray(prepState.position);
+      } else {
+        marker.position.y = prepState.height;
+      }
+      this.positionPartVideoPreview(partId, marker);
+    }
+
+    this.applyVideoPrepState(partId, prepState);
+    this.updatePartMarkerVisibility();
+    this.updatePartMarkerMaterials();
   }
 
   exitXr(): void {
@@ -741,10 +907,37 @@ export class ExperienceScene {
     this.restartChromaBillboard();
   }
 
+  playPartVideo(partId: string, fromStart = true, muted = false): boolean {
+    const part = this.getPartFromId(partId);
+    if (!part?.videoUrl) {
+      return false;
+    }
+
+    this.showPartVideoBillboard(part, fromStart, { autoPlay: true, muted });
+    return true;
+  }
+
   setChromaSettings(settings: ChromaKeySettings): void {
     this.chromaSettings = normalizeChromaKeySettings(settings);
     this.applyChromaSettingsToMaterial();
     this.updateXrChromaPanelTexture();
+  }
+
+  setSelectedPartVideoChromaSettings(settings: ChromaKeySettings): boolean {
+    if (!this.selectedPartMarkerId) {
+      return false;
+    }
+
+    const chromaSettings = normalizeChromaKeySettings(settings);
+    const part = this.getPartFromId(this.selectedPartMarkerId);
+    const state = part
+      ? this.getVideoPrepStateForPart(part)
+      : normalizeVideoPrepState({
+          ...this.videoPrepStates.get(this.selectedPartMarkerId),
+          settings: chromaSettings
+        });
+    this.setVideoPrepState(this.selectedPartMarkerId, { ...state, settings: chromaSettings });
+    return Boolean(part || this.partVideoPreviews.has(this.selectedPartMarkerId) || this.activePartVideoPartId === this.selectedPartMarkerId);
   }
 
   setChromaBillboardState(state: ChromaBillboardState): void {
@@ -811,6 +1004,115 @@ export class ExperienceScene {
     this.updateXrChromaPanelTexture();
   }
 
+  setSelectedPartVideoScale(scale: number): boolean {
+    const part = this.getPartFromId(this.selectedPartMarkerId);
+    if (!part || !this.selectedPartMarkerId) {
+      return false;
+    }
+
+    const clamped = normalizeChromaScale(scale);
+    this.setVideoPrepState(this.selectedPartMarkerId, {
+      ...this.getVideoPrepStateForPart(part),
+      scale: clamped
+    });
+    return true;
+  }
+
+  setSelectedPartVideoHeight(height: number): boolean {
+    const marker = this.selectedPartMarkerId ? this.markersByPartId.get(this.selectedPartMarkerId) : undefined;
+    const part = this.getPartFromId(this.selectedPartMarkerId);
+    if (!marker || !this.selectedPartMarkerId || !part) {
+      return false;
+    }
+
+    marker.position.y = normalizeChromaHeight(height);
+    const position = marker.position.toArray() as Vector3Tuple;
+    this.setVideoPrepState(this.selectedPartMarkerId, {
+      ...this.getVideoPrepStateForPart(part),
+      position,
+      height: position[1]
+    });
+    this.positionPartVideoPreview(this.selectedPartMarkerId, marker);
+    if (this.activePartVideoPartId === this.selectedPartMarkerId) {
+      this.positionPartVideoBillboard(marker);
+    }
+    this.emitPartMarkerPositionChange(this.selectedPartMarkerId, true);
+    return true;
+  }
+
+  restartSelectedPartVideo(): boolean {
+    const preview = this.selectedPartMarkerId ? this.partVideoPreviews.get(this.selectedPartMarkerId) : undefined;
+    if (preview) {
+      preview.video.currentTime = 0;
+      preview.video.muted = false;
+      preview.video.volume = 1;
+      void preview.video.play().catch(() => undefined);
+      return true;
+    }
+
+    const part = this.getPartFromId(this.selectedPartMarkerId);
+    if (!part?.videoUrl) {
+      return false;
+    }
+
+    if (this.activePartVideoPartId !== part.id) {
+      this.showPartVideoBillboard(part, true, { autoPlay: true, muted: this.role !== "teacher" });
+    } else if (this.partVideo) {
+      this.partVideo.currentTime = 0;
+      this.partVideo.muted = false;
+      this.partVideo.volume = 1;
+      void this.partVideo.play().catch(() => undefined);
+    }
+    return true;
+  }
+
+  playSelectedPartVideo(): boolean {
+    const preview = this.selectedPartMarkerId ? this.partVideoPreviews.get(this.selectedPartMarkerId) : undefined;
+    if (preview) {
+      preview.video.muted = false;
+      preview.video.volume = 1;
+      void preview.video.play().catch(() => undefined);
+      return true;
+    }
+
+    const part = this.getPartFromId(this.selectedPartMarkerId);
+    if (!part?.videoUrl) {
+      return false;
+    }
+
+    if (this.activePartVideoPartId !== part.id) {
+      this.showPartVideoBillboard(part, false, { autoPlay: true, muted: false });
+    } else if (this.partVideo) {
+      this.partVideo.muted = false;
+      this.partVideo.volume = 1;
+      void this.partVideo.play().catch(() => undefined);
+    }
+    return true;
+  }
+
+  pauseSelectedPartVideo(): boolean {
+    return this.pausePartVideo(this.selectedPartMarkerId);
+  }
+
+  pausePartVideo(partId: string | undefined): boolean {
+    if (!partId) {
+      return false;
+    }
+
+    const preview = this.partVideoPreviews.get(partId);
+    if (preview) {
+      preview.video.pause();
+      return true;
+    }
+
+    if (this.activePartVideoPartId === partId && this.partVideo) {
+      this.partVideo.pause();
+      return true;
+    }
+
+    return false;
+  }
+
   setChromaPlaybackMode(mode: ChromaPlaybackMode): void {
     this.chromaPlaybackMode = mode === "once" ? "once" : "loop";
     if (this.chromaVideo) {
@@ -857,7 +1159,10 @@ export class ExperienceScene {
     texture.generateMipmaps = false;
 
     const material = this.createChromaKeyMaterial(texture, this.chromaSettings);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(PORTRAIT_VIDEO_WIDTH, PORTRAIT_VIDEO_HEIGHT), material);
+    const mesh = new THREE.Mesh(
+      createFinitePlaneGeometry(PORTRAIT_VIDEO_WIDTH, PORTRAIT_VIDEO_HEIGHT, 1, KEYED_PERSON_TARGET_HEIGHT_METERS),
+      material
+    );
     mesh.name = "Chroma dancer billboard";
     mesh.position.copy(this.getChromaBillboardPosition());
     mesh.position.y = this.chromaHeight;
@@ -881,6 +1186,10 @@ export class ExperienceScene {
   restartChromaBillboard(): void {
     this.showChromaBillboard();
     void this.playChromaVideo(true).catch(() => undefined);
+  }
+
+  pauseChromaBillboard(): void {
+    this.chromaVideo?.pause();
   }
 
   hideChromaBillboard(): void {
@@ -1000,8 +1309,9 @@ export class ExperienceScene {
   private createXrButton(label: string, action: XrButtonAction, width: number): XrButtonDefinition {
     const root = new THREE.Group();
     const textureUrl = uiButtonTextures[action];
-    const aspect = uiButtonAspects[action] ?? 4;
-    const height = Math.min(0.34, width / aspect);
+    const safeWidth = finitePositive(width, 0.28);
+    const aspect = finitePositive(uiButtonAspects[action] ?? 4, 4);
+    const height = Math.min(0.34, safeWidth / aspect);
     const material = textureUrl
       ? new THREE.MeshBasicMaterial({
           map: this.textureLoader.load(textureUrl),
@@ -1011,10 +1321,10 @@ export class ExperienceScene {
           side: THREE.DoubleSide
         })
       : this.createCanvasButtonMaterial(label);
-    const labelMesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+    const labelMesh = new THREE.Mesh(createFinitePlaneGeometry(safeWidth, height, 0.28, 0.07), material);
 
     const hitTarget = new THREE.Mesh(
-      new THREE.BoxGeometry(width + 0.06, height + 0.04, 0.08),
+      new THREE.BoxGeometry(safeWidth + 0.06, height + 0.04, 0.08),
       new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
@@ -1068,7 +1378,10 @@ export class ExperienceScene {
       depthWrite: false,
       side: THREE.DoubleSide
     });
-    const surface = new THREE.Mesh(new THREE.PlaneGeometry(XR_CHROMA_PANEL_WIDTH, XR_CHROMA_PANEL_HEIGHT), material);
+    const surface = new THREE.Mesh(
+      createFinitePlaneGeometry(XR_CHROMA_PANEL_WIDTH, XR_CHROMA_PANEL_HEIGHT),
+      material
+    );
     surface.renderOrder = 20;
     this.xrChromaPanel.add(surface);
 
@@ -1333,7 +1646,7 @@ export class ExperienceScene {
       depthWrite: false,
       side: THREE.DoubleSide
     });
-    const panel = new THREE.Mesh(new THREE.PlaneGeometry(0.72, 0.36), material);
+    const panel = new THREE.Mesh(createFinitePlaneGeometry(0.72, 0.36), material);
     panel.position.set(0, 0.14, -0.85);
     panel.visible = false;
     return panel;
@@ -1546,17 +1859,39 @@ export class ExperienceScene {
       const markerMaterial = activationMode === "student"
         ? new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0c4a6e })
         : new THREE.MeshStandardMaterial({ color: 0xffc857, emissive: 0x7a4b00 });
+      markerMaterial.depthTest = false;
+      markerMaterial.depthWrite = false;
       const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(0.07, 24, 24),
+        new THREE.SphereGeometry(PART_MARKER_RADIUS, 24, 24),
         markerMaterial
       );
       marker.position.fromArray(part.markerPosition);
       marker.visible = false;
+      marker.renderOrder = 11;
       this.classroomRoot.add(marker);
       this.markers.set(marker, part);
       this.markersByPartId.set(part.id, marker);
+      this.createPartVideoPreview(part, marker);
     }
     this.updatePartMarkerVisibility();
+    this.updatePartVideoPreviewVisibility();
+  }
+
+  private initializeVideoPrepStates(parts: ExperiencePartConfig[]): void {
+    for (const part of parts) {
+      if (!part.videoUrl || this.videoPrepStates.has(part.id)) {
+        continue;
+      }
+      const prepState = this.getVideoPrepStateForPart(part);
+      this.videoPrepStates.set(part.id, prepState);
+      this.partVideoSettings.set(part.id, prepState.settings);
+      this.partMarkerStates = {
+        ...this.partMarkerStates,
+        [part.id]: prepState.markerState
+      };
+    }
+    this.updatePartMarkerVisibility();
+    this.updatePartMarkerMaterials();
   }
 
   private createModelStateMarker(): void {
@@ -1803,7 +2138,7 @@ export class ExperienceScene {
       depthWrite: false,
       side: THREE.DoubleSide
     });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.78, 0.2), material);
+    const mesh = new THREE.Mesh(createFinitePlaneGeometry(0.78, 0.2), material);
     mesh.renderOrder = 20;
     return mesh;
   }
@@ -1833,12 +2168,17 @@ export class ExperienceScene {
     for (const [marker, part] of this.markers) {
       marker.visible = this.shouldShowPartMarker(part);
     }
+    this.updatePartVideoPreviewVisibility();
   }
 
   private shouldShowPartMarker(part: ExperiencePartConfig): boolean {
     const activationMode = this.getPartVideoActivationMode(part);
     if (activationMode === "student") {
-      return this.experienceStarted && this.role === "student";
+      const state = this.partMarkerStates[part.id] ?? "green";
+      if (this.role === "teacher") {
+        return true;
+      }
+      return state === "green" && this.role === "student";
     }
     if (activationMode === "teacher") {
       return this.experienceStarted && this.role === "teacher";
@@ -1848,6 +2188,241 @@ export class ExperienceScene {
 
   private getPartVideoActivationMode(part: ExperiencePartConfig): ExperienceVideoActivationMode {
     return part.videoActivationMode ?? "standard";
+  }
+
+  private updatePartMarkerMaterials(): void {
+    for (const [markerObject, part] of this.markers) {
+      const marker = markerObject as THREE.Mesh;
+      if (!(marker.material instanceof THREE.MeshStandardMaterial)) {
+        continue;
+      }
+      const activationMode = this.getPartVideoActivationMode(part);
+      if (activationMode !== "student" && activationMode !== "teacher") {
+        marker.material.color.setHex(0xffc857);
+        marker.material.emissive.setHex(0x7a4b00);
+        continue;
+      }
+      const state = this.partMarkerStates[part.id] ?? "green";
+      if (state === "red") {
+        marker.material.color.setHex(0xef4444);
+        marker.material.emissive.setHex(0x7f1d1d);
+      } else if (state === "orange") {
+        marker.material.color.setHex(0xf97316);
+        marker.material.emissive.setHex(0x7c2d12);
+      } else {
+        marker.material.color.setHex(0x38bdf8);
+        marker.material.emissive.setHex(0x0c4a6e);
+      }
+    }
+  }
+
+  private handlePartMarkerSelected(part: ExperiencePartConfig): void {
+    this.selectedPartMarkerId = part.id;
+    const activationMode = this.getPartVideoActivationMode(part);
+    const teacherPreviewOnly = this.role === "teacher" && activationMode === "student";
+    const prepState = this.getVideoPrepStateForPart(part);
+    const canShowSelectedVideo = prepState.markerState !== "red" && (this.role === "teacher" || prepState.markerState === "green");
+    if (!teacherPreviewOnly && canShowSelectedVideo && (activationMode === "student" || activationMode === "teacher") && part.videoUrl) {
+      this.showPartVideoBillboard(part, true, {
+        autoPlay: this.role !== "teacher",
+        muted: this.role === "teacher"
+      });
+    }
+    this.options.onMarkerSelected(part);
+  }
+
+  private createPartVideoPreview(part: ExperiencePartConfig, marker: THREE.Object3D): void {
+    if (!part.videoUrl || this.getPartVideoActivationMode(part) !== "student") {
+      return;
+    }
+
+    const video = document.createElement("video");
+    video.src = part.videoUrl;
+    video.crossOrigin = "anonymous";
+    video.loop = true;
+    video.muted = true;
+    video.volume = 0;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "true");
+    video.disablePictureInPicture = true;
+    video.preload = "auto";
+
+    const texture = new THREE.VideoTexture(video);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+
+    const prepState = this.getVideoPrepStateForPart(part);
+    const material = this.createChromaKeyMaterial(texture, prepState.settings);
+    material.uniforms.opacity.value = Math.min(material.uniforms.opacity.value, 0.72);
+    const mesh = new THREE.Mesh(
+      createFinitePlaneGeometry(PART_VIDEO_DEFAULT_WIDTH, PART_VIDEO_DEFAULT_HEIGHT),
+      material
+    );
+    mesh.name = `Teacher preview billboard: ${part.label}`;
+    mesh.scale.setScalar(prepState.scale);
+    mesh.renderOrder = 6;
+    this.classroomRoot.add(mesh);
+
+    const preview = { mesh, video, texture, material };
+    this.partVideoPreviews.set(part.id, preview);
+    this.positionPartVideoPreview(part.id, marker);
+    this.updatePartVideoPreviewVisibility();
+
+    video.addEventListener("loadedmetadata", () => this.positionPartVideoPreview(part.id, marker), { once: true });
+  }
+
+  private positionPartVideoPreview(partId: string, marker?: THREE.Object3D): void {
+    const preview = this.partVideoPreviews.get(partId);
+    if (!preview) {
+      return;
+    }
+
+    const source = marker ?? this.markersByPartId.get(partId);
+    if (source) {
+      preview.mesh.position.copy(source.position);
+    }
+  }
+
+  private updatePartVideoPreviewVisibility(): void {
+    for (const [partId, preview] of this.partVideoPreviews) {
+      const marker = this.markersByPartId.get(partId);
+      const state = this.partMarkerStates[partId] ?? "green";
+      const shouldShow = this.role === "teacher" && Boolean(marker?.visible) && state !== "red";
+      preview.mesh.visible = shouldShow;
+      if (!shouldShow && !preview.video.paused) {
+        preview.video.pause();
+      }
+    }
+  }
+
+  private updatePartVideoPreviewFacing(): void {
+    for (const preview of this.partVideoPreviews.values()) {
+      if (preview.mesh.visible) {
+        this.applyUprightBillboardFacing(preview.mesh);
+      }
+    }
+  }
+
+  private getPartIdForPreviewMesh(mesh: THREE.Object3D): string | undefined {
+    for (const [partId, preview] of this.partVideoPreviews) {
+      if (preview.mesh === mesh) {
+        return partId;
+      }
+    }
+    return undefined;
+  }
+
+  private getPartFromId(partId: string | undefined): ExperiencePartConfig | undefined {
+    if (!partId) {
+      return undefined;
+    }
+
+    const marker = this.markersByPartId.get(partId);
+    return marker ? this.markers.get(marker) : undefined;
+  }
+
+  private getVideoPrepStateForPart(part: ExperiencePartConfig): VideoPrepState {
+    const existing = this.videoPrepStates.get(part.id);
+    const marker = this.markersByPartId.get(part.id);
+    const position = existing?.position ?? (marker ? marker.position.toArray() as Vector3Tuple : part.markerPosition);
+    return normalizeVideoPrepState({
+      settings: existing?.settings ?? this.partVideoSettings.get(part.id) ?? this.chromaSettings,
+      position,
+      scale: existing?.scale ?? 1,
+      height: existing?.height ?? position[1] ?? part.markerPosition[1],
+      playbackMode: existing?.playbackMode ?? (this.getPartVideoActivationMode(part) === "student" ? "once" : this.chromaPlaybackMode),
+      playbackRevision: existing?.playbackRevision ?? 0,
+      playbackPaused: existing?.playbackPaused ?? false,
+      markerState: existing?.markerState ?? this.partMarkerStates[part.id] ?? "green"
+    });
+  }
+
+  private applyVideoPrepState(partId: string, state: VideoPrepState): void {
+    const prepState = normalizeVideoPrepState(state);
+    const wasPausedBySharedState = this.videoPlaybackPausedStates.get(partId) === true;
+    this.videoPlaybackPausedStates.set(partId, prepState.playbackPaused);
+    const preview = this.partVideoPreviews.get(partId);
+    if (preview) {
+      this.applyChromaSettingsToShaderMaterial(preview.material, prepState.settings, 0.72);
+      preview.mesh.scale.setScalar(prepState.scale);
+      this.positionPartVideoPreview(partId);
+      if (prepState.playbackPaused) {
+        preview.video.pause();
+      } else if (wasPausedBySharedState && preview.video.paused) {
+        void preview.video.play().catch(() => undefined);
+      }
+    }
+
+    if (this.activePartVideoPartId === partId) {
+      if (this.partVideoMaterial) {
+        this.applyChromaSettingsToShaderMaterial(this.partVideoMaterial, prepState.settings, prepState.settings.opacity);
+      }
+      if (this.partVideoBillboard) {
+        this.partVideoBillboard.scale.setScalar(prepState.scale);
+        this.positionPartVideoBillboard();
+      }
+      if (this.partVideo) {
+        this.partVideo.loop = prepState.playbackMode === "loop";
+        if (prepState.playbackPaused) {
+          this.partVideo.pause();
+        } else if (wasPausedBySharedState && this.partVideo.paused) {
+          void this.partVideo.play().catch(() => undefined);
+        }
+      }
+    }
+
+    const part = this.getPartFromId(partId);
+    if (!part || this.getPartVideoActivationMode(part) !== "teacher") {
+      return;
+    }
+
+    const visibleForRole = prepState.markerState === "green" || (prepState.markerState === "orange" && this.role === "teacher");
+    if (!visibleForRole) {
+      if (this.activePartVideoPartId === partId) {
+        this.removePartVideoBillboard();
+      }
+      return;
+    }
+
+    const lastRevision = this.videoPlaybackRevisions.get(partId) ?? 0;
+    const shouldRestart = prepState.playbackRevision > 0 && prepState.playbackRevision !== lastRevision;
+    if (shouldRestart) {
+      this.videoPlaybackRevisions.set(partId, prepState.playbackRevision);
+      this.showPartVideoBillboard(part, true, { autoPlay: true, muted: this.role !== "teacher" });
+    }
+  }
+
+  private getPreviewHitFromCurrentRay(): THREE.Intersection | undefined {
+    const previews = Array.from(this.partVideoPreviews.values(), (preview) => preview.mesh).filter((mesh) => mesh.visible);
+    return previews.length > 0 ? this.raycaster.intersectObjects(previews, false)[0] : undefined;
+  }
+
+  private getPartFromCurrentRay(): ExperiencePartConfig | undefined {
+    const markerHits = this.raycaster.intersectObjects([...this.markers.keys()], false);
+    if (markerHits[0]) {
+      return this.markers.get(markerHits[0].object);
+    }
+
+    const previewHit = this.getPreviewHitFromCurrentRay();
+    return this.getPartFromId(this.getPartIdForPreviewMesh(previewHit?.object as THREE.Object3D));
+  }
+
+  private getPartIdFromCurrentRay(): string | undefined {
+    const markerHits = this.raycaster.intersectObjects([...this.markersByPartId.values()], false);
+    if (markerHits[0]) {
+      const hitMesh = markerHits[0].object as THREE.Mesh;
+      for (const [partId, mesh] of this.markersByPartId) {
+        if (mesh === hitMesh) {
+          return partId;
+        }
+      }
+    }
+
+    const previewHit = this.getPreviewHitFromCurrentRay();
+    return this.getPartIdForPreviewMesh(previewHit?.object as THREE.Object3D);
   }
 
   private updateRemoteParticipantLabelsFacing(): void {
@@ -1925,7 +2500,7 @@ export class ExperienceScene {
   private addFallbackGarage(): void {
     const group = new THREE.Group();
     const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(9, 9),
+      createFinitePlaneGeometry(9, 9),
       new THREE.MeshStandardMaterial({ color: 0x2d3748, roughness: 0.9 })
     );
     floor.rotation.x = -Math.PI / 2;
@@ -1966,7 +2541,7 @@ export class ExperienceScene {
     const floorSize = Math.min(80, Math.max(14, environmentFootprint));
     const floorY = bounds && Number.isFinite(bounds.min.y) ? bounds.min.y + 0.01 : 0;
     const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(floorSize, floorSize),
+      createFinitePlaneGeometry(floorSize, floorSize, 14),
       new THREE.MeshBasicMaterial({
         color: 0x38bdf8,
         transparent: true,
@@ -2074,19 +2649,50 @@ export class ExperienceScene {
 
   private createParticipantHeadsetTemplate(root: THREE.Object3D): THREE.Object3D {
     const clone = root.clone(true);
+    this.prepareParticipantHeadsetMaterials(clone);
     clone.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(clone);
     const size = bounds.getSize(new THREE.Vector3());
     const center = bounds.getCenter(new THREE.Vector3());
-    clone.position.sub(center);
-    clone.position.y -= bounds.min.y;
     const largestAxis = Math.max(size.x, size.y, size.z);
-    const targetSize = 0.24;
-    const scale = largestAxis > 0 ? targetSize / largestAxis : 1;
-    clone.scale.setScalar(scale);
-    clone.rotation.set(0, Math.PI, 0);
-    clone.position.y -= 0.08;
-    return clone;
+    const scale = largestAxis > 0 ? PARTICIPANT_HEADSET_TARGET_SIZE / largestAxis : 1;
+    clone.position.set(-center.x, -center.y, -center.z);
+
+    const template = new THREE.Group();
+    template.add(clone);
+    template.scale.setScalar(scale);
+    template.rotation.set(0, Math.PI * 1.75, Math.PI);
+    return template;
+  }
+
+  private prepareParticipantHeadsetMaterials(root: THREE.Object3D): void {
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh) {
+        return;
+      }
+
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 18;
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const prepared = materials.map((material) => {
+        const nextMaterial = material.clone();
+        nextMaterial.side = THREE.DoubleSide;
+        nextMaterial.depthTest = false;
+        nextMaterial.depthWrite = false;
+        if ("color" in nextMaterial && nextMaterial.color instanceof THREE.Color) {
+          nextMaterial.color.lerp(new THREE.Color(0xffffff), 0.22);
+        }
+        if ("emissive" in nextMaterial && nextMaterial.emissive instanceof THREE.Color) {
+          nextMaterial.emissive.set(0x1f2937);
+          if ("emissiveIntensity" in nextMaterial && typeof nextMaterial.emissiveIntensity === "number") {
+            nextMaterial.emissiveIntensity = Math.max(nextMaterial.emissiveIntensity, 0.28);
+          }
+        }
+        return nextMaterial;
+      });
+      mesh.material = Array.isArray(mesh.material) ? prepared : prepared[0];
+    });
   }
 
   private refreshRemoteParticipantHeadsets(): void {
@@ -2096,12 +2702,12 @@ export class ExperienceScene {
 
     for (const visual of this.remoteParticipants.values()) {
       visual.headAnchor.remove(visual.headModel);
-      visual.headModel = this.participantHeadsetTemplate.clone(true);
+      visual.headModel = this.createRemoteHeadModel(visual.deviceKind);
       visual.headAnchor.add(visual.headModel);
     }
   }
 
-  private updateRemoteParticipant(participant: Participant): void {
+  private updateRemoteParticipant(participant: Participant, spawnIndex: number, spawnCount: number): void {
     if (!participant.presence) {
       return;
     }
@@ -2112,10 +2718,29 @@ export class ExperienceScene {
       this.classroomRoot.add(visual.root);
     }
 
-    this.applyPresenceJoint(visual.headAnchor, participant.presence.head);
-    this.applyPresenceToController(visual.leftController, participant.presence.leftHand, participant.presence.inVr);
-    this.applyPresenceToController(visual.rightController, participant.presence.rightHand, participant.presence.inVr);
-    visual.label.position.copy(visual.headAnchor.position).add(new THREE.Vector3(0, 0.24, 0));
+    const headJoint = this.getVisibleRemoteHeadJoint(participant.presence);
+    const useSpawn = spawnIndex >= 0 && spawnCount > 0;
+    let spawnedHeadPosition: THREE.Vector3 | undefined;
+    if (useSpawn) {
+      this.applyRemoteParticipantSpawn(visual, spawnIndex, spawnCount);
+      spawnedHeadPosition = this.applySpawnedRemoteHead(visual.headAnchor, headJoint, visual.root);
+    } else {
+      visual.root.position.set(0, 0, 0);
+      visual.root.quaternion.identity();
+      this.applyPresenceJoint(visual.headAnchor, headJoint);
+    }
+    this.updateRemoteParticipantHeadModel(visual, participant);
+    if (useSpawn && spawnedHeadPosition) {
+      this.applySpawnedRemoteController(visual.leftController, participant.presence, "left", headJoint, spawnedHeadPosition, visual.root);
+      this.applySpawnedRemoteController(visual.rightController, participant.presence, "right", headJoint, spawnedHeadPosition, visual.root);
+    } else {
+      this.applyPresenceToController(visual.leftController, participant.presence, "left");
+      this.applyPresenceToController(visual.rightController, participant.presence, "right");
+    }
+    this.updateRemoteParticipantLabelText(visual, participant);
+    visual.label.position.copy(visual.headAnchor.position).add(new THREE.Vector3(0, REMOTE_PARTICIPANT_LABEL_OFFSET, 0));
+    visual.label.visible = true;
+    visual.headModel.visible = true;
     this.applyUprightBillboardFacing(visual.label);
   }
 
@@ -2123,41 +2748,403 @@ export class ExperienceScene {
     const root = new THREE.Group();
     const headAnchor = new THREE.Group();
     root.add(headAnchor);
-    const headModel = this.participantHeadsetTemplate?.clone(true) ?? this.createFallbackHeadsetMesh();
+    const deviceKind = this.getParticipantDeviceKind(participant);
+    const headModel = this.createRemoteHeadModel(deviceKind);
     headAnchor.add(headModel);
 
-    const leftController = this.createRemoteControllerMesh(0x38bdf8);
-    const rightController = this.createRemoteControllerMesh(0xf97316);
+    const leftController = this.createRemoteControllerModel(0x38bdf8);
+    const rightController = this.createRemoteControllerModel(0xf97316);
     root.add(leftController, rightController);
 
-    const label = this.createObjectStateLabel(`${participant.name} (${participant.role})`);
+    const labelText = this.getParticipantLabelText(participant);
+    const label = this.createObjectStateLabel(labelText);
+    label.scale.setScalar(1.35);
     root.add(label);
 
-    return { root, headAnchor, headModel, leftController, rightController, label };
+    return { root, headAnchor, headModel, leftController, rightController, label, labelText, deviceKind };
   }
 
-  private createFallbackHeadsetMesh(): THREE.Mesh {
-    return new THREE.Mesh(
-      new THREE.BoxGeometry(0.18, 0.1, 0.12),
-      new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.35, metalness: 0.18 })
-    );
+  private applyRemoteParticipantSpawn(visual: RemoteParticipantVisual, spawnIndex: number, spawnCount: number): void {
+    const viewerPose = this.getRemoteParticipantViewerPose();
+    const spreadOffset = (spawnIndex - (spawnCount - 1) / 2) * REMOTE_PARTICIPANT_SPAWN_SPREAD;
+    const spawnPosition = viewerPose.position
+      .clone()
+      .addScaledVector(viewerPose.forward, REMOTE_PARTICIPANT_SPAWN_DISTANCE)
+      .addScaledVector(viewerPose.right, spreadOffset);
+    spawnPosition.y = 0;
+    visual.root.position.copy(spawnPosition);
+    visual.root.lookAt(viewerPose.position.x, visual.root.position.y, viewerPose.position.z);
   }
 
-  private createRemoteControllerMesh(color: number): THREE.Mesh {
-    return new THREE.Mesh(
-      new THREE.BoxGeometry(0.045, 0.12, 0.045),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.38, metalness: 0.1 })
-    );
+  private getRemoteParticipantViewerPose(): { position: THREE.Vector3; forward: THREE.Vector3; right: THREE.Vector3 } {
+    const viewer = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+    viewer.updateMatrixWorld(true);
+
+    const worldPosition = viewer.getWorldPosition(new THREE.Vector3());
+    const worldQuaternion = viewer.getWorldQuaternion(new THREE.Quaternion());
+    const origin = this.classroomRoot.worldToLocal(worldPosition.clone());
+    const forwardWorld = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuaternion).setY(0);
+    if (forwardWorld.lengthSq() < 0.001) {
+      forwardWorld.set(0, 0, -1);
+    }
+    forwardWorld.normalize();
+    const rightWorld = new THREE.Vector3(1, 0, 0).applyQuaternion(worldQuaternion).setY(0);
+    if (rightWorld.lengthSq() < 0.001) {
+      rightWorld.crossVectors(forwardWorld, new THREE.Vector3(0, 1, 0));
+    }
+    rightWorld.normalize();
+
+    const forward = this.classroomRoot.worldToLocal(worldPosition.clone().add(forwardWorld)).sub(origin).setY(0);
+    const right = this.classroomRoot.worldToLocal(worldPosition.clone().add(rightWorld)).sub(origin).setY(0);
+    if (forward.lengthSq() < 0.001) {
+      forward.set(0, 0, -1);
+    }
+    if (right.lengthSq() < 0.001) {
+      right.set(1, 0, 0);
+    }
+
+    return {
+      position: origin,
+      forward: forward.normalize(),
+      right: right.normalize()
+    };
   }
 
-  private applyPresenceToController(mesh: THREE.Mesh, joint: PresenceJoint | null, visible: boolean): void {
-    mesh.visible = Boolean(joint && visible);
-    if (!joint || !visible) {
+  private updateRemoteParticipantHeadModel(visual: RemoteParticipantVisual, participant: Participant): void {
+    const deviceKind = this.getParticipantDeviceKind(participant);
+    if (deviceKind === visual.deviceKind) {
       return;
     }
 
-    mesh.position.fromArray(joint.position);
-    mesh.quaternion.fromArray(joint.quaternion);
+    visual.headAnchor.remove(visual.headModel);
+    visual.headModel = this.createRemoteHeadModel(deviceKind);
+    visual.deviceKind = deviceKind;
+    visual.headAnchor.add(visual.headModel);
+  }
+
+  private createRemoteHeadModel(deviceKind: ParticipantDeviceKind): THREE.Group {
+    const root = new THREE.Group();
+    root.add(this.createParticipantDeviceMarker(deviceKind));
+    if (deviceKind === "vr") {
+      root.add(this.participantHeadsetTemplate?.clone(true) ?? this.createFallbackHeadsetMesh());
+    } else if (deviceKind === "tablet") {
+      root.add(this.createTabletParticipantModel());
+    } else {
+      root.add(this.createDesktopParticipantModel());
+    }
+    return root;
+  }
+
+  private createDesktopParticipantModel(): THREE.Group {
+    const root = new THREE.Group();
+    const frameMaterial = new THREE.MeshStandardMaterial({
+      color: 0x111827,
+      emissive: 0x111827,
+      emissiveIntensity: 0.24,
+      roughness: 0.38,
+      metalness: 0.12,
+      depthTest: false,
+      depthWrite: false
+    });
+    const screenMaterial = new THREE.MeshBasicMaterial({
+      color: 0x22c55e,
+      transparent: true,
+      opacity: 0.72,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.22, 0.035), frameMaterial);
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.16), screenMaterial);
+    frame.renderOrder = 18;
+    screen.renderOrder = 19;
+    screen.position.z = -0.019;
+    const stand = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.12, 0.025), frameMaterial.clone());
+    stand.renderOrder = 18;
+    stand.position.y = -0.17;
+    const base = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.025, 0.08), frameMaterial.clone());
+    base.renderOrder = 18;
+    base.position.y = -0.24;
+    root.add(frame, screen, stand, base);
+    return root;
+  }
+
+  private createTabletParticipantModel(): THREE.Group {
+    const root = new THREE.Group();
+    const shellMaterial = new THREE.MeshStandardMaterial({
+      color: 0x111827,
+      emissive: 0x1f2937,
+      emissiveIntensity: 0.22,
+      roughness: 0.4,
+      metalness: 0.1,
+      depthTest: false,
+      depthWrite: false
+    });
+    const screenMaterial = new THREE.MeshBasicMaterial({
+      color: 0xf59e0b,
+      transparent: true,
+      opacity: 0.72,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const shell = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.3, 0.026), shellMaterial);
+    shell.renderOrder = 18;
+    shell.rotation.z = -0.12;
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.17, 0.24), screenMaterial);
+    screen.renderOrder = 19;
+    screen.position.z = -0.014;
+    screen.rotation.z = shell.rotation.z;
+    root.add(shell, screen);
+    return root;
+  }
+
+  private createParticipantDeviceMarker(deviceKind: ParticipantDeviceKind): THREE.Mesh {
+    const color = deviceKind === "vr" ? 0x38bdf8 : deviceKind === "tablet" ? 0xf59e0b : 0x22c55e;
+    const marker = new THREE.Mesh(
+      new THREE.RingGeometry(0.2, 0.25, 40),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.62,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      })
+    );
+    marker.position.z = -0.025;
+    marker.renderOrder = 6;
+    return marker;
+  }
+
+  private updateRemoteParticipantLabelText(visual: RemoteParticipantVisual, participant: Participant): void {
+    const labelText = this.getParticipantLabelText(participant);
+    if (labelText === visual.labelText) {
+      return;
+    }
+
+    const nextLabel = this.createObjectStateLabel(labelText);
+    nextLabel.scale.copy(visual.label.scale);
+    nextLabel.position.copy(visual.label.position);
+    nextLabel.quaternion.copy(visual.label.quaternion);
+    visual.root.remove(visual.label);
+    this.disposeSprite(visual.label);
+    visual.label = nextLabel;
+    visual.labelText = labelText;
+    visual.root.add(visual.label);
+  }
+
+  private getParticipantLabelText(participant: Participant): string {
+    const kind = this.getParticipantDeviceKind(participant);
+    const tag = kind === "vr" ? "VR" : kind === "tablet" ? "TAB" : "PC";
+    return `${participant.name} (${tag})`;
+  }
+
+  private getParticipantDeviceKind(participant: Participant): ParticipantDeviceKind {
+    return participant.presence?.inVr ? "vr" : participant.deviceKind;
+  }
+
+  private createFallbackHeadsetMesh(): THREE.Mesh {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.28, 0.16, 0.16),
+      new THREE.MeshStandardMaterial({
+        color: 0x111827,
+        emissive: 0x1f2937,
+        emissiveIntensity: 0.32,
+        roughness: 0.35,
+        metalness: 0.18,
+        depthTest: false,
+        depthWrite: false
+      })
+    );
+    mesh.renderOrder = 18;
+    return mesh;
+  }
+
+  private createRemoteControllerModel(color: number): THREE.Group {
+    const root = new THREE.Group();
+    root.visible = false;
+
+    const gripMaterial = new THREE.MeshStandardMaterial({
+      color: 0x111827,
+      emissive: 0x111827,
+      emissiveIntensity: 0.18,
+      roughness: 0.42,
+      metalness: 0.1,
+      depthTest: false,
+      depthWrite: false
+    });
+    const accentMaterial = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const grip = new THREE.Mesh(new THREE.CapsuleGeometry(0.026, 0.13, 5, 12), gripMaterial);
+    grip.renderOrder = 18;
+    grip.rotation.x = Math.PI / 9;
+    grip.position.set(0, -0.06, 0.015);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.043, 16, 10), gripMaterial.clone());
+    head.renderOrder = 18;
+    head.scale.set(1.15, 0.7, 0.9);
+    head.position.set(0, 0.035, -0.018);
+
+    const trackingRing = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.006, 8, 32), accentMaterial);
+    trackingRing.renderOrder = 19;
+    trackingRing.rotation.x = Math.PI / 2;
+    trackingRing.position.set(0, 0.055, -0.035);
+
+    const pointer = new THREE.Mesh(new THREE.ConeGeometry(0.018, 0.075, 16), accentMaterial.clone());
+    pointer.renderOrder = 19;
+    pointer.rotation.x = -Math.PI / 2;
+    pointer.position.set(0, 0.02, -0.105);
+
+    root.add(grip, head, trackingRing, pointer);
+    return root;
+  }
+
+  private getVisibleRemoteHeadJoint(presence: ParticipantPresence): PresenceJoint {
+    const handJoints = [presence.leftHand, presence.rightHand].filter((joint): joint is PresenceJoint => Boolean(joint));
+    if (
+      presence.inVr &&
+      handJoints.length > 0 &&
+      !this.isRemoteHeadPosePlausible(presence.head, handJoints)
+    ) {
+      return this.createHeadJointFromHands(presence, handJoints);
+    }
+
+    if (presence.head.position[1] >= REMOTE_HEAD_MIN_VISIBLE_HEIGHT) {
+      return presence.head;
+    }
+
+    if (handJoints.length === 0) {
+      return {
+        position: [
+          presence.head.position[0],
+          REMOTE_HEAD_DEFAULT_HEIGHT,
+          presence.head.position[2]
+        ],
+        quaternion: presence.head.quaternion
+      };
+    }
+
+    return this.createHeadJointFromHands(presence, handJoints);
+  }
+
+  private isRemoteHeadPosePlausible(head: PresenceJoint, handJoints: PresenceJoint[]): boolean {
+    const headPosition = new THREE.Vector3().fromArray(head.position);
+    if (
+      headPosition.y < REMOTE_HEAD_MIN_VISIBLE_HEIGHT ||
+      headPosition.y > 3.2 ||
+      !Number.isFinite(headPosition.lengthSq())
+    ) {
+      return false;
+    }
+
+    const maxHandHeight = Math.max(...handJoints.map((joint) => joint.position[1]));
+    if (headPosition.y - maxHandHeight > REMOTE_HEAD_MAX_HAND_VERTICAL_GAP) {
+      return false;
+    }
+
+    return handJoints.some((joint) => {
+      const handPosition = new THREE.Vector3().fromArray(joint.position);
+      return headPosition.distanceTo(handPosition) <= REMOTE_HEAD_MAX_HAND_DISTANCE;
+    });
+  }
+
+  private createHeadJointFromHands(presence: ParticipantPresence, handJoints: PresenceJoint[]): PresenceJoint {
+    const averagedHands = handJoints.reduce(
+      (sum, joint) => {
+        sum.x += joint.position[0];
+        sum.y = Math.max(sum.y, joint.position[1]);
+        sum.z += joint.position[2];
+        return sum;
+      },
+      { x: 0, y: 0, z: 0 }
+    );
+    const divisor = handJoints.length;
+    const fallbackY = Math.max(REMOTE_HEAD_DEFAULT_HEIGHT, averagedHands.y + REMOTE_HEAD_FROM_HAND_OFFSET);
+    return {
+      position: [
+        averagedHands.x / divisor,
+        fallbackY,
+        averagedHands.z / divisor
+      ],
+      quaternion: presence.head.quaternion
+    };
+  }
+
+  private applyPresenceToController(
+    controller: THREE.Group,
+    presence: ParticipantPresence,
+    handedness: "left" | "right"
+  ): void {
+    const joint = handedness === "left" ? presence.leftHand : presence.rightHand;
+    const visibleJoint = joint ?? (presence.inVr ? this.createFallbackControllerJoint(presence, handedness) : null);
+    controller.visible = Boolean(visibleJoint && presence.inVr);
+    this.setRemoteControllerOpacity(controller, joint ? 1 : 0.42);
+    if (!visibleJoint || !presence.inVr) {
+      return;
+    }
+
+    controller.position.fromArray(visibleJoint.position);
+    controller.quaternion.fromArray(visibleJoint.quaternion);
+  }
+
+  private applySpawnedRemoteController(
+    controller: THREE.Group,
+    presence: ParticipantPresence,
+    handedness: "left" | "right",
+    headJoint: PresenceJoint,
+    headLocalPosition: THREE.Vector3,
+    root: THREE.Object3D
+  ): void {
+    const joint = handedness === "left" ? presence.leftHand : presence.rightHand;
+    const visibleJoint = joint ?? (presence.inVr ? this.createFallbackControllerJoint(presence, handedness) : null);
+    controller.visible = Boolean(visibleJoint && presence.inVr);
+    this.setRemoteControllerOpacity(controller, joint ? 1 : 0.42);
+    if (!visibleJoint || !presence.inVr) {
+      return;
+    }
+
+    controller.position.copy(this.getSpawnedRemoteJointPosition(visibleJoint, headJoint, headLocalPosition));
+    controller.quaternion.copy(this.getSpawnedRemoteJointQuaternion(visibleJoint, root));
+  }
+
+  private setRemoteControllerOpacity(controller: THREE.Object3D, opacity: number): void {
+    controller.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh) {
+        return;
+      }
+
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        material.transparent = opacity < 1;
+        material.opacity = opacity;
+        material.depthTest = false;
+        material.depthWrite = false;
+      }
+    });
+  }
+
+  private createFallbackControllerJoint(presence: ParticipantPresence, handedness: "left" | "right"): PresenceJoint {
+    const headJoint = this.getVisibleRemoteHeadJoint(presence);
+    const headPosition = new THREE.Vector3().fromArray(headJoint.position);
+    const headQuaternion = new THREE.Quaternion().fromArray(headJoint.quaternion);
+    const offset = new THREE.Vector3(
+      handedness === "left" ? -REMOTE_CONTROLLER_FALLBACK_SIDE : REMOTE_CONTROLLER_FALLBACK_SIDE,
+      -REMOTE_CONTROLLER_FALLBACK_DOWN,
+      -REMOTE_CONTROLLER_FALLBACK_FORWARD
+    ).applyQuaternion(headQuaternion);
+    const position = headPosition.add(offset);
+    return {
+      position: [position.x, Math.max(0.55, position.y), position.z],
+      quaternion: headJoint.quaternion
+    };
   }
 
   private applyPresenceJoint(target: THREE.Object3D, joint: PresenceJoint): void {
@@ -2165,14 +3152,56 @@ export class ExperienceScene {
     target.quaternion.fromArray(joint.quaternion);
   }
 
+  private applySpawnedRemoteHead(target: THREE.Object3D, headJoint: PresenceJoint, root: THREE.Object3D): THREE.Vector3 {
+    const headPosition = new THREE.Vector3(
+      0,
+      Math.min(2.15, Math.max(1.25, headJoint.position[1] || REMOTE_PARTICIPANT_SPAWN_HEAD_HEIGHT)),
+      0
+    );
+    target.position.copy(headPosition);
+    target.quaternion.copy(this.getSpawnedRemoteJointQuaternion(headJoint, root));
+    return headPosition;
+  }
+
+  private getSpawnedRemoteJointPosition(
+    joint: PresenceJoint,
+    headJoint: PresenceJoint,
+    headLocalPosition: THREE.Vector3
+  ): THREE.Vector3 {
+    const offset = new THREE.Vector3(
+      joint.position[0] - headJoint.position[0],
+      joint.position[1] - headJoint.position[1],
+      joint.position[2] - headJoint.position[2]
+    );
+    offset.x = Math.min(REMOTE_PARTICIPANT_MAX_HAND_OFFSET, Math.max(-REMOTE_PARTICIPANT_MAX_HAND_OFFSET, offset.x));
+    offset.y = Math.min(0.45, Math.max(-0.85, offset.y));
+    offset.z = Math.min(REMOTE_PARTICIPANT_MAX_HAND_OFFSET, Math.max(-REMOTE_PARTICIPANT_MAX_HAND_OFFSET, offset.z));
+    return headLocalPosition.clone().add(offset);
+  }
+
+  private getSpawnedRemoteJointQuaternion(joint: PresenceJoint, root: THREE.Object3D): THREE.Quaternion {
+    root.updateMatrixWorld(true);
+    const rootQuaternion = root.getWorldQuaternion(new THREE.Quaternion());
+    return rootQuaternion.invert().multiply(new THREE.Quaternion().fromArray(joint.quaternion));
+  }
+
   private disposeRemoteParticipantVisual(visual: RemoteParticipantVisual): void {
     visual.label.geometry.dispose();
     const labelMaterial = visual.label.material as THREE.MeshBasicMaterial;
     labelMaterial.map?.dispose();
     labelMaterial.dispose();
-    for (const mesh of [visual.leftController, visual.rightController]) {
-      mesh.geometry.dispose();
-      (mesh.material as THREE.Material).dispose();
+    for (const controller of [visual.leftController, visual.rightController]) {
+      controller.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) {
+          return;
+        }
+        mesh.geometry.dispose();
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const material of materials) {
+          material.dispose();
+        }
+      });
     }
   }
 
@@ -2187,13 +3216,38 @@ export class ExperienceScene {
   }
 
   private captureControllerPresence(handedness: XRHandedness): PresenceJoint | null {
+    const matchedController = this.findControllerByHandedness(handedness);
+    if (matchedController) {
+      return this.capturePresenceJoint(this.controllerGrips.get(matchedController) ?? matchedController);
+    }
+    return null;
+  }
+
+  private findControllerByHandedness(handedness: XRHandedness): THREE.Object3D | undefined {
     for (const [controller, source] of this.controllerInputSources) {
       if (source.handedness !== handedness) {
         continue;
       }
-      return this.capturePresenceJoint(controller);
+      return controller;
     }
-    return null;
+
+    const controllers = [this.renderer.xr.getController(0), this.renderer.xr.getController(1)];
+    for (const controller of controllers) {
+      const source = this.getInputSourceForController(controller);
+      if (source?.handedness === handedness) {
+        return controller;
+      }
+    }
+
+    if (handedness !== "left" && handedness !== "right") {
+      return undefined;
+    }
+
+    const connectedControllers = Array.from(this.controllerInputSources.keys());
+    if (connectedControllers.length !== 2) {
+      return undefined;
+    }
+    return connectedControllers[handedness === "left" ? 0 : 1];
   }
 
   private capturePresenceJoint(object: THREE.Object3D): PresenceJoint {
@@ -2269,7 +3323,14 @@ export class ExperienceScene {
     }
     this.markers.clear();
     this.markersByPartId.clear();
+    this.removePartVideoPreviews();
+    this.partVideoSettings.clear();
+    this.videoPrepStates.clear();
+    this.videoPlaybackRevisions.clear();
+    this.videoPlaybackPausedStates.clear();
+    this.partMarkerStates = {};
     this.desktopGrabMarkerPartId = undefined;
+    this.selectedPartMarkerId = undefined;
     this.grabbedMarkerController = undefined;
     this.grabbedMarkerPartId = undefined;
     this.removeModelStateMarker();
@@ -2279,6 +3340,7 @@ export class ExperienceScene {
     this.hideXrChromaPanel();
     this.chromaPosition = undefined;
     this.removeIntroBillboard();
+    this.removePartVideoBillboard();
   }
 
   private fadeOutIntro(mesh: THREE.Mesh): void {
@@ -2314,11 +3376,146 @@ export class ExperienceScene {
     this.introMaterial = undefined;
   }
 
+  private showPartVideoBillboard(part: ExperiencePartConfig, fromStart: boolean, options: PartVideoPlaybackOptions = {}): void {
+    if (!part.videoUrl) {
+      return;
+    }
+
+    const prepState = this.getVideoPrepStateForPart(part);
+    const canShow = prepState.markerState === "green" || (prepState.markerState === "orange" && this.role === "teacher");
+    if (!canShow) {
+      if (this.activePartVideoPartId === part.id) {
+        this.removePartVideoBillboard();
+      }
+      return;
+    }
+
+    this.removePartVideoBillboard();
+    const marker = this.markersByPartId.get(part.id);
+    const autoPlay = (options.autoPlay ?? true) && !prepState.playbackPaused;
+    const muted = options.muted ?? false;
+    const video = document.createElement("video");
+    video.src = part.videoUrl;
+    video.crossOrigin = "anonymous";
+    video.loop = prepState.playbackMode === "loop";
+    video.muted = muted;
+    video.volume = muted ? 0 : 1;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "true");
+    video.disablePictureInPicture = true;
+    video.preload = "auto";
+
+    const texture = new THREE.VideoTexture(video);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+
+    const material = this.createChromaKeyMaterial(texture, prepState.settings);
+    const mesh = new THREE.Mesh(
+      createFinitePlaneGeometry(PART_VIDEO_DEFAULT_WIDTH, PART_VIDEO_DEFAULT_HEIGHT),
+      material
+    );
+    mesh.name = `Part video billboard: ${part.label}`;
+    mesh.scale.setScalar(prepState.scale);
+    mesh.renderOrder = 9;
+    this.classroomRoot.add(mesh);
+
+    this.partVideo = video;
+    this.partVideoTexture = texture;
+    this.partVideoMaterial = material;
+    this.partVideoBillboard = mesh;
+    this.activePartVideoPartId = part.id;
+    this.positionPartVideoBillboard(marker);
+    this.updatePartVideoBillboardFacing();
+
+    video.addEventListener("loadedmetadata", () => {
+      if (this.partVideoBillboard === mesh) {
+        this.positionPartVideoBillboard(marker);
+      }
+    }, { once: true });
+    video.addEventListener("ended", () => {
+      if (this.partVideo === video) {
+        this.removePartVideoBillboard();
+      }
+    }, { once: true });
+    if (fromStart) {
+      video.currentTime = 0;
+    }
+    if (autoPlay) {
+      void video.play().catch(() => undefined);
+    }
+  }
+
+  private positionPartVideoBillboard(marker?: THREE.Object3D): void {
+    if (!this.partVideoBillboard) {
+      return;
+    }
+
+    const source = marker ?? (this.activePartVideoPartId ? this.markersByPartId.get(this.activePartVideoPartId) : undefined);
+    if (source) {
+      this.partVideoBillboard.position.copy(source.position);
+      return;
+    }
+
+    const cameraWorldPosition = this.camera.getWorldPosition(new THREE.Vector3());
+    const cameraWorldDirection = this.camera.getWorldDirection(new THREE.Vector3());
+    cameraWorldDirection.y = 0;
+    if (cameraWorldDirection.lengthSq() < 0.001) {
+      cameraWorldDirection.set(0, 0, -1);
+    }
+    cameraWorldDirection.normalize();
+    const worldPosition = cameraWorldPosition.addScaledVector(cameraWorldDirection, 2);
+    worldPosition.y = Math.max(1.4, worldPosition.y);
+    this.partVideoBillboard.position.copy(this.classroomRoot.worldToLocal(worldPosition));
+  }
+
+  private removePartVideoBillboard(): void {
+    if (this.partVideo) {
+      this.partVideo.pause();
+      this.partVideo.removeAttribute("src");
+      this.partVideo.load();
+      this.partVideo = undefined;
+    }
+    if (this.partVideoBillboard) {
+      this.classroomRoot.remove(this.partVideoBillboard);
+      this.partVideoBillboard.geometry.dispose();
+      this.partVideoBillboard = undefined;
+    }
+    this.partVideoTexture?.dispose();
+    this.partVideoTexture = undefined;
+    this.partVideoMaterial?.dispose();
+    this.partVideoMaterial = undefined;
+    this.activePartVideoPartId = undefined;
+  }
+
+  private removePartVideoPreviews(): void {
+    for (const preview of this.partVideoPreviews.values()) {
+      preview.video.pause();
+      preview.video.removeAttribute("src");
+      preview.video.load();
+      this.classroomRoot.remove(preview.mesh);
+      preview.mesh.geometry.dispose();
+      preview.texture.dispose();
+      preview.material.dispose();
+    }
+    this.partVideoPreviews.clear();
+  }
+
   private updateIntroBillboardFacing(): void {
     if (!this.introBillboard) {
       return;
     }
     this.applyUprightBillboardFacing(this.introBillboard);
+  }
+
+  private updatePartVideoBillboardFacing(): void {
+    if (!this.partVideoBillboard) {
+      return;
+    }
+
+    this.applyUprightBillboardFacing(this.partVideoBillboard);
   }
 
   private applyUprightBillboardFacing(target: THREE.Object3D, flipY = false): void {
@@ -2332,16 +3529,18 @@ export class ExperienceScene {
   }
 
   private applyChromaSettingsToMaterial(): void {
-    if (!this.chromaMaterial) {
-      return;
+    if (this.chromaMaterial) {
+      this.applyChromaSettingsToShaderMaterial(this.chromaMaterial, this.chromaSettings, this.chromaSettings.opacity);
     }
+  }
 
-    this.chromaMaterial.uniforms.similarity.value = this.chromaSettings.similarity;
-    this.chromaMaterial.uniforms.smoothness.value = this.chromaSettings.smoothness;
-    this.chromaMaterial.uniforms.spill.value = this.chromaSettings.spill;
-    this.chromaMaterial.uniforms.opacity.value = this.chromaSettings.opacity;
-    this.chromaMaterial.uniforms.brightness.value = this.chromaSettings.brightness;
-    this.chromaMaterial.uniforms.contrast.value = this.chromaSettings.contrast;
+  private applyChromaSettingsToShaderMaterial(material: THREE.ShaderMaterial, settings: ChromaKeySettings, opacity: number): void {
+    material.uniforms.similarity.value = settings.similarity;
+    material.uniforms.smoothness.value = settings.smoothness;
+    material.uniforms.spill.value = settings.spill;
+    material.uniforms.opacity.value = opacity;
+    material.uniforms.brightness.value = settings.brightness;
+    material.uniforms.contrast.value = settings.contrast;
   }
 
   private async playChromaVideo(fromStart: boolean): Promise<void> {
@@ -2433,6 +3632,7 @@ export class ExperienceScene {
     }
 
     if (event.button === 2) {
+      this.reanchorInspectMousePivot();
       this.desktopLookActive = true;
       this.renderer.domElement.setPointerCapture(event.pointerId);
       event.preventDefault();
@@ -2453,7 +3653,7 @@ export class ExperienceScene {
       }
 
       const modelHit = this.modelRoot ? this.raycaster.intersectObject(this.modelRoot, true)[0] : undefined;
-      if (modelHit) {
+      if (modelHit && !this.modelTransformLocked) {
         this.startDesktopDistanceGrab("model", modelHit.point, event.pointerId);
         event.preventDefault();
         return;
@@ -2461,6 +3661,25 @@ export class ExperienceScene {
     }
 
     if (event.button === 0 && event.ctrlKey && this.role === "teacher") {
+      const partId = this.getPartIdFromCurrentRay();
+      if (partId) {
+        this.selectedPartMarkerId = partId;
+        this.desktopGrabMarkerPartId = partId;
+        this.desktopGrabActive = true;
+        this.desktopGrabMode = "free";
+        const marker = this.markersByPartId.get(partId);
+        const markerWorldPosition = marker?.getWorldPosition(new THREE.Vector3());
+        const previewHit = this.getPreviewHitFromCurrentRay();
+        this.desktopGrabDistance = Math.max(
+          0.5,
+          Math.min(10, this.raycaster.ray.origin.distanceTo(previewHit?.point ?? markerWorldPosition ?? this.raycaster.ray.origin))
+        );
+        this.desktopGrabPointerId = event.pointerId;
+        this.renderer.domElement.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+
       const chromaHit = this.chromaBillboard?.visible ? this.raycaster.intersectObject(this.chromaBillboard, false)[0] : undefined;
       if (chromaHit) {
         this.startDesktopObjectGrab("chroma", chromaHit.point, event.pointerId);
@@ -2468,31 +3687,12 @@ export class ExperienceScene {
         return;
       }
 
-      if (this.modelRoot) {
+      if (this.modelRoot && !this.modelTransformLocked) {
         const hit = this.raycaster.intersectObject(this.modelRoot, true)[0];
         if (hit) {
           this.startDesktopObjectGrab("model", hit.point, event.pointerId);
           event.preventDefault();
           return;
-        }
-      }
-
-      if (this.role === "teacher") {
-        const markerHits = this.raycaster.intersectObjects([...this.markersByPartId.values()], false);
-        if (markerHits.length > 0) {
-          const hitMesh = markerHits[0].object as THREE.Mesh;
-          for (const [partId, mesh] of this.markersByPartId) {
-            if (mesh === hitMesh) {
-              this.desktopGrabMarkerPartId = partId;
-              this.desktopGrabActive = true;
-              this.desktopGrabMode = "free";
-              this.desktopGrabDistance = Math.max(0.5, Math.min(10, this.raycaster.ray.origin.distanceTo(markerHits[0].point)));
-              this.desktopGrabPointerId = event.pointerId;
-              this.renderer.domElement.setPointerCapture(event.pointerId);
-              event.preventDefault();
-              return;
-            }
-          }
         }
       }
     }
@@ -2505,10 +3705,9 @@ export class ExperienceScene {
       return;
     }
 
-    const hits = this.raycaster.intersectObjects([...this.markers.keys()], false);
-    const part = hits[0] ? this.markers.get(hits[0].object) : undefined;
+    const part = this.getPartFromCurrentRay();
     if (part) {
-      this.options.onMarkerSelected(part);
+      this.handlePartMarkerSelected(part);
       return;
     }
 
@@ -2542,7 +3741,7 @@ export class ExperienceScene {
       if (this.desktopGrabTarget === "chroma" && this.chromaBillboard) {
         this.chromaBillboard.position.copy(this.classroomRoot.worldToLocal(target));
         this.emitChromaTransformChange();
-      } else if (this.desktopGrabTarget === "model" && this.modelRoot) {
+      } else if (this.desktopGrabTarget === "model" && this.modelRoot && !this.modelTransformLocked) {
         this.modelRoot.position.copy(this.classroomRoot.worldToLocal(target));
         this.emitModelPositionChange();
       } else if (this.desktopGrabMarkerPartId) {
@@ -2608,6 +3807,39 @@ export class ExperienceScene {
     this.pointer.y = -(((event.clientY - bounds.top) / bounds.height) * 2 - 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
+    const selectedMarker = this.selectedPartMarkerId ? this.markersByPartId.get(this.selectedPartMarkerId) : undefined;
+    if (this.selectedPartMarkerId && selectedMarker) {
+      this.moveObjectAlongPointerRay(selectedMarker, event.deltaY);
+      this.positionPartVideoPreview(this.selectedPartMarkerId, selectedMarker);
+      if (this.selectedPartMarkerId === this.activePartVideoPartId) {
+        this.positionPartVideoBillboard(selectedMarker);
+      }
+      this.emitPartMarkerPositionChange(this.selectedPartMarkerId, true);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (event.shiftKey) {
+      const partId = this.selectedPartMarkerId ?? this.getPartIdFromCurrentRay();
+      const marker = partId ? this.markersByPartId.get(partId) : undefined;
+      if (partId && marker) {
+        this.selectedPartMarkerId = partId;
+        this.moveObjectAlongPointerRay(marker, event.deltaY);
+        this.positionPartVideoPreview(partId, marker);
+        if (partId === this.activePartVideoPartId) {
+          this.positionPartVideoBillboard(marker);
+        }
+        this.emitPartMarkerPositionChange(partId, true);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
     const chromaHit = this.chromaBillboard?.visible ? this.raycaster.intersectObject(this.chromaBillboard, false)[0] : undefined;
     if (chromaHit && this.chromaBillboard) {
       this.moveObjectAlongPointerRay(this.chromaBillboard, event.deltaY);
@@ -2618,12 +3850,17 @@ export class ExperienceScene {
     }
 
     const modelHit = this.modelRoot ? this.raycaster.intersectObject(this.modelRoot, true)[0] : undefined;
-    if ((modelHit || this.modelRoot) && this.modelRoot) {
+    if ((modelHit || this.modelRoot) && this.modelRoot && !this.modelTransformLocked) {
       this.moveObjectAlongPointerRay(this.modelRoot, event.deltaY);
       this.emitModelPositionChange(true);
       event.preventDefault();
       event.stopPropagation();
       return;
+    }
+
+    if (modelHit && this.modelTransformLocked) {
+      event.preventDefault();
+      event.stopPropagation();
     }
   };
 
@@ -2882,7 +4119,7 @@ export class ExperienceScene {
     const hits = this.raycaster.intersectObjects([...this.markers.keys()], false);
     const part = hits[0] ? this.markers.get(hits[0].object) : undefined;
     if (part) {
-      this.options.onMarkerSelected(part);
+      this.handlePartMarkerSelected(part);
     }
   }
 
@@ -3043,10 +4280,9 @@ export class ExperienceScene {
       return;
     }
 
-    const markerHits = this.raycaster.intersectObjects([...this.markers.keys()], false);
-    const part = markerHits[0] ? this.markers.get(markerHits[0].object) : undefined;
+    const part = this.getPartFromCurrentRay();
     if (part) {
-      this.options.onMarkerSelected(part);
+      this.handlePartMarkerSelected(part);
       return;
     }
 
@@ -3379,7 +4615,11 @@ export class ExperienceScene {
   }
 
   private updateGrabbedModelPosition(): void {
-    if (!this.grabbedModelController || !this.modelRoot) {
+    if (!this.grabbedModelController || !this.modelRoot || this.modelTransformLocked) {
+      if (this.modelTransformLocked) {
+        this.grabbedModelController = undefined;
+        this.objectRotationActive = false;
+      }
       return;
     }
 
@@ -3783,6 +5023,8 @@ export class ExperienceScene {
     }
     this.updateIntroBillboardFacing();
     this.updateChromaBillboardFacing();
+    this.updatePartVideoPreviewFacing();
+    this.updatePartVideoBillboardFacing();
     this.maybeSyncParticipantPresence();
     this.renderer.render(this.scene, this.camera);
   };
@@ -3919,6 +5161,21 @@ export class ExperienceScene {
   private applyDesktopLook(): void {
     this.userRig.rotation.y = this.desktopYaw;
     this.camera.rotation.x = this.desktopPitch;
+  }
+
+  private reanchorInspectMousePivot(): void {
+    if (!this.isTabletInspectMode()) {
+      return;
+    }
+
+    this.camera.updateMatrixWorld(true);
+    const cameraWorldPosition = this.camera.getWorldPosition(new THREE.Vector3());
+    const pivotDistance = Math.min(this.tabletOrbitDistance, DESKTOP_INSPECT_MOUSE_PIVOT_DISTANCE);
+    this.tabletOrbitDistance = Math.min(TABLET_MAX_ZOOM, Math.max(TABLET_MIN_ZOOM, pivotDistance));
+    const cameraOffset = new THREE.Vector3(0, 0, this.tabletOrbitDistance)
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), this.desktopYaw);
+    this.tabletOrbitTarget.copy(cameraWorldPosition).sub(cameraOffset);
+    this.applyInspectCamera();
   }
 
   private isDesktopControlKey(key: string): boolean {
@@ -4300,6 +5557,7 @@ export class ExperienceScene {
         }
       `,
       transparent: true,
+      depthTest: true,
       depthWrite: false,
       side: THREE.DoubleSide
     });
