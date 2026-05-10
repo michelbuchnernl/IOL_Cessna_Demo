@@ -48,6 +48,7 @@ interface AppState {
   socket: ClassroomSocketState;
   localCalibrated: boolean;
   xrError?: string;
+  spawnSuggestion?: string;
   selectedPart?: ExperiencePartConfig;
   chromaPanelOpen: boolean;
   chromaSettings: ChromaKeySettings;
@@ -277,6 +278,7 @@ export class ClassroomApp {
       ${this.renderTabletControlsOverlay()}
       ${this.renderTouchGuidance()}
       ${this.renderXrError()}
+      ${this.renderSpawnSuggestion()}
       ${this.renderSelectedPart()}
       ${this.renderChromaPanel()}
     `;
@@ -362,6 +364,21 @@ export class ClassroomApp {
     return this.state.xrError ? `<p class="xr-error">${this.escape(this.state.xrError)}</p>` : "";
   }
 
+  private renderSpawnSuggestion(): string {
+    if (!this.state.spawnSuggestion) {
+      return "";
+    }
+
+    return `
+      <aside class="spawn-suggestion">
+        <button class="close-button" data-action="clear-spawn-suggestion">×</button>
+        <h2>Captured View</h2>
+        <p>Copied to clipboard. Paste this into the experience config when the view feels right.</p>
+        <pre>${this.escape(this.state.spawnSuggestion)}</pre>
+      </aside>
+    `;
+  }
+
   private renderSessionPanel(): string {
     const code = this.state.socket.code ?? "----";
     const participants = this.state.socket.participants;
@@ -398,6 +415,7 @@ export class ClassroomApp {
       <button class="secondary-button" data-command="shell-off">${commands["shell-off"] ? "Shell Hidden" : "Shell Off"}</button>
       <button class="secondary-button" data-command="play-introduction">Restart Video</button>
       <button class="secondary-button" data-command="reveal-markers">${commands["reveal-markers"] ? "Markers Revealed" : "Reveal Markers"}</button>
+      <button class="secondary-button" data-action="capture-view">Capture View</button>
     `;
   }
 
@@ -433,7 +451,7 @@ export class ClassroomApp {
 
     return `
       <label class="object-state-control">
-        Cessna
+        Turbofan
         ${this.renderObjectStateSelect("model")}
       </label>
       <label class="object-state-control">
@@ -697,6 +715,17 @@ export class ClassroomApp {
       const origin = this.scene?.calibrateOrigin() ?? [];
       this.state.localCalibrated = true;
       this.socket.calibrate(origin);
+      this.render();
+      return;
+    }
+
+    if (action === "capture-view") {
+      this.captureViewSuggestion();
+      return;
+    }
+
+    if (action === "clear-spawn-suggestion") {
+      this.state.spawnSuggestion = undefined;
       this.render();
       return;
     }
@@ -1124,6 +1153,19 @@ export class ClassroomApp {
       height: this.state.chromaHeight,
       playbackMode: this.state.chromaPlaybackMode
     });
+  }
+
+  private captureViewSuggestion(): void {
+    const suggestion = this.scene?.getViewSuggestion();
+    if (!suggestion) {
+      this.state.spawnSuggestion = "Scene is not ready yet.";
+      this.render();
+      return;
+    }
+
+    this.state.spawnSuggestion = suggestion;
+    void navigator.clipboard?.writeText(suggestion).catch(() => undefined);
+    this.render();
   }
 
   private escape(value: string): string {

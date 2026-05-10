@@ -1,1 +1,5 @@
-public/assets/experiences/hydrogen-car/models/*.glb filter=lfs diff=lfs merge=lfs -text
+*.glb binary
+*.mp4 binary
+*.wasm binary
+*.bin binary
+*.png binary

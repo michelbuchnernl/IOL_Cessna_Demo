@@ -169,7 +169,7 @@ const TOUCH_PINCH_SENSITIVITY = 0.01;
 const TABLET_ORBIT_SENSITIVITY = 0.01;
 const TABLET_PAN_SENSITIVITY = 0.0016;
 const TABLET_MIN_ZOOM = 0.8;
-const TABLET_MAX_ZOOM = 8;
+const TABLET_MAX_ZOOM = 18;
 const TABLET_DOUBLE_TAP_MS = 320;
 const TABLET_TAP_MOVE_THRESHOLD = 14;
 const TABLET_JOYSTICK_RADIUS = 64;
@@ -357,6 +357,7 @@ export class ExperienceScene {
   private lastMarkerPositionSync = 0;
   private frameDelta = 0.016;
   private loadVersion = 0;
+  private currentExperience?: ExperienceConfig;
   private rightBWasPressed = false;
   private rightThumbstickWasActive = false;
   private rightThumbstickTurnWasActive = false;
@@ -479,6 +480,7 @@ export class ExperienceScene {
     const loadVersion = this.loadVersion + 1;
     this.loadVersion = loadVersion;
     this.mode = mode;
+    this.currentExperience = experience;
     this.tabletControlMode = experience.tabletControlMode ?? "explore";
     this.modelObjectLabel = this.getModelObjectLabel(experience);
     this.clearExperience();
@@ -654,6 +656,33 @@ export class ExperienceScene {
     this.pendingModelPosition = undefined;
     this.repositionChromaMarker();
     this.repositionModelStateMarker();
+  }
+
+  getViewSuggestion(): string {
+    const number = (value: number) => Number(value.toFixed(3));
+    const tuple = (vector: THREE.Vector3): Vector3Tuple => [
+      number(vector.x),
+      number(vector.y),
+      number(vector.z)
+    ];
+    const cameraWorldPosition = this.camera.getWorldPosition(new THREE.Vector3());
+    const suggestion = this.isTabletInspectMode()
+      ? {
+          mode: "inspect",
+          target: tuple(this.tabletOrbitTarget),
+          distance: number(this.tabletOrbitDistance),
+          yaw: number(this.desktopYaw),
+          pitch: number(this.desktopPitch)
+        }
+      : {
+          mode: "walk",
+          position: tuple(this.userRig.position),
+          cameraWorldPosition: tuple(cameraWorldPosition),
+          yaw: number(this.desktopYaw),
+          pitch: number(this.desktopPitch)
+        };
+
+    return `initialView: ${JSON.stringify(suggestion, null, 2)}`;
   }
 
   setShellVisible(visible: boolean): void {
@@ -1866,11 +1895,11 @@ export class ExperienceScene {
 
   private getModelObjectLabel(experience: ExperienceConfig): string {
     const text = `${experience.title} ${experience.description}`.toLowerCase();
-    if (text.includes("cessna")) {
-      return "Cessna";
-    }
     if (text.includes("turbofan") || text.includes("turbine")) {
       return "Turbofan";
+    }
+    if (text.includes("cessna")) {
+      return "Cessna";
     }
     if (text.includes("air") || text.includes("noaa")) {
       return "Aircraft";
@@ -1931,7 +1960,10 @@ export class ExperienceScene {
   private addTeleportFloor(environment?: THREE.Object3D): void {
     const bounds = environment ? new THREE.Box3().setFromObject(environment) : undefined;
     const size = bounds?.getSize(new THREE.Vector3());
-    const floorSize = Math.min(80, Math.max(14, size ? Math.max(size.x, size.z) + 2 : 14));
+    const environmentFootprint = size && Number.isFinite(size.x) && Number.isFinite(size.z)
+      ? Math.max(size.x, size.z) + 2
+      : 14;
+    const floorSize = Math.min(80, Math.max(14, environmentFootprint));
     const floorY = bounds && Number.isFinite(bounds.min.y) ? bounds.min.y + 0.01 : 0;
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(floorSize, floorSize),
@@ -2894,6 +2926,16 @@ export class ExperienceScene {
 
   private resetTabletControlsForExperience(): void {
     if (this.isTabletInspectMode() && this.modelRoot) {
+      const initialView = this.currentExperience?.initialView;
+      if (initialView?.mode === "inspect" && initialView.target && initialView.distance) {
+        this.tabletOrbitTarget.fromArray(initialView.target);
+        this.desktopYaw = initialView.yaw;
+        this.desktopPitch = initialView.pitch;
+        this.tabletOrbitDistance = Math.min(TABLET_MAX_ZOOM, Math.max(TABLET_MIN_ZOOM, initialView.distance));
+        this.applyInspectCamera();
+        return;
+      }
+
       this.modelRoot.updateMatrixWorld(true);
       const bounds = new THREE.Box3().setFromObject(this.modelRoot);
       const center = bounds.getCenter(new THREE.Vector3());
@@ -2901,15 +2943,16 @@ export class ExperienceScene {
       this.tabletOrbitTarget.copy(center);
       this.desktopYaw = Math.PI;
       this.desktopPitch = -0.22;
-      this.tabletOrbitDistance = Math.min(TABLET_MAX_ZOOM, Math.max(1.6, Math.max(size.x, size.y, size.z) * 2.2));
+      this.tabletOrbitDistance = Math.min(TABLET_MAX_ZOOM, Math.max(2.4, Math.max(size.x, size.y, size.z) * 3));
       this.applyInspectCamera();
       return;
     }
 
-    this.desktopYaw = 0;
-    this.desktopPitch = 0;
+    const initialView = this.currentExperience?.initialView;
+    this.desktopYaw = initialView?.mode === "walk" ? initialView.yaw : 0;
+    this.desktopPitch = initialView?.mode === "walk" ? initialView.pitch : 0;
     this.camera.position.set(0, 1.55, 2.2);
-    this.userRig.position.set(0, 0, 0);
+    this.userRig.position.fromArray(initialView?.mode === "walk" && initialView.position ? initialView.position : [0, 0, 0]);
     this.applyDesktopLook();
   }
 

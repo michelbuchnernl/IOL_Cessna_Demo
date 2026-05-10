@@ -1,8 +1,10 @@
 import basicSsl from "@vitejs/plugin-basic-ssl";
 import { defineConfig } from "vite";
 
+const disableSsl = process.env.VITE_DISABLE_SSL === "1";
+
 export default defineConfig({
-  plugins: [basicSsl()],
+  plugins: disableSsl ? [] : [basicSsl()],
   server: {
     host: "0.0.0.0",
     port: 5173,

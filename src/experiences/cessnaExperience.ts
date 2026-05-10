@@ -6,6 +6,13 @@ export const cessnaExperience: ExperienceConfig = {
   description: "Explore the complete hangar scene with a turbofan teaching prop and teacher- or student-triggered video activators.",
   modes: ["ar", "vr", "fallback"],
   tabletControlMode: "inspect",
+  initialView: {
+    mode: "inspect",
+    target: [7.867, 1.795, 0.383],
+    distance: 18,
+    yaw: 6.559,
+    pitch: -0.109
+  },
   model: {
     url: "/assets/experiences/iol-cessna-demo/models/turbofan.glb",
     scale: 0.45,

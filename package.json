@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "dev:codex": "VITE_DISABLE_SSL=1 vite --host 0.0.0.0",
     "server": "tsx server/index.ts",
     "dev:all": "concurrently -n vite,ws -c cyan,magenta \"npm run dev\" \"npm run server\"",
+    "dev:codex:all": "concurrently -n vite,ws -c cyan,magenta \"npm run dev:codex\" \"npm run server\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
   },

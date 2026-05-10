@@ -36,12 +36,22 @@ export interface ExperiencePartConfig {
   videoActivationMode?: ExperienceVideoActivationMode;
 }
 
+export interface ExperienceInitialViewConfig {
+  mode: "inspect" | "walk";
+  target?: Vector3Tuple;
+  position?: Vector3Tuple;
+  distance?: number;
+  yaw: number;
+  pitch: number;
+}
+
 export interface ExperienceConfig {
   id: string;
   title: string;
   description: string;
   modes: ExperienceMode[];
   tabletControlMode?: TabletControlMode;
+  initialView?: ExperienceInitialViewConfig;
   model: ExperienceModelConfig;
   props?: ExperiencePropConfig[];
   environment?: ExperienceEnvironmentConfig;
