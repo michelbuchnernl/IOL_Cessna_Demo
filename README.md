@@ -2,6 +2,12 @@
 
 Single-experience WebXR classroom demo for inspecting an aircraft hangar in AR, VR, and fallback mode with shared object controls, teacher-prepped chroma-keyed videos, and student-triggered video markers.
 
+## Docs
+
+- [Audit V3, oktober 2026 (NL)](docs/audit-2026-10-04.md): known bugs, measurements, headset test list and the V4 plan
+- [Architecture](docs/architecture.md)
+- [Presentation runbook](docs/presentation-runbook.md)
+
 ## Stack
 
 - Vite + TypeScript client
