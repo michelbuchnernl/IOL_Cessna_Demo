@@ -11,6 +11,7 @@ Add `?stats=1` to the URL to show an FPS / draw call / triangle meter (also insi
 
 ## Docs
 
+- [Overdracht 4 oktober 2026 (NL)](docs/handover-2026-10-04.md): where the project stands and what is next
 - [AR alignment idea (NL)](docs/ar-uitlijning.md): shared anchor for classes standing around a model
 
 - [Audit V3, oktober 2026 (NL)](docs/audit-2026-10-04.md): known bugs, measurements, headset test list and the V4 plan
