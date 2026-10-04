@@ -25,6 +25,14 @@ export interface ExperienceEnvironmentConfig {
   rotation?: Vector3Tuple;
   fitToSize?: number;
   brightness?: number;
+  /** Hide the environment shell during an immersive AR session, so only the object and the videos overlay the real room. */
+  hideInAr?: boolean;
+  /** The hangar is lit by 20 lamps inside its GLB, so it renders at a very low exposure. Unlit-file rooms need their own values. */
+  lighting?: {
+    toneMappingExposure: number;
+    hemisphereIntensity: number;
+    directionalIntensity: number;
+  };
 }
 
 export interface ExperiencePartConfig {

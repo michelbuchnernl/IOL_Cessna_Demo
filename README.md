@@ -2,7 +2,16 @@
 
 Single-experience WebXR classroom demo for inspecting an aircraft hangar in AR, VR, and fallback mode with shared object controls, teacher-prepped chroma-keyed videos, and student-triggered video markers.
 
+## Experiences
+
+- **Klaslokaal: turbine met specialist** (`src/experiences/klaslokaalExperience.ts`): small low-poly room (~140 triangles, 1 draw call) for 6-10 students, one turbofan on a plinth and one teacher-started specialist video. Built for Quest 2. Regenerate the room with `python3 tools/make_room_glb.py`.
+- **IOL Hangar Demo** (`src/experiences/cessnaExperience.ts`): the original V3 hangar with 737 and Cessna. Heavy (500k+ triangles); suitable for Quest 3S and desktop.
+
+Add `?stats=1` to the URL to show an FPS / draw call / triangle meter (also inside the headset). In XR, calls and triangles count both eyes.
+
 ## Docs
+
+- [AR alignment idea (NL)](docs/ar-uitlijning.md): shared anchor for classes standing around a model
 
 - [Audit V3, oktober 2026 (NL)](docs/audit-2026-10-04.md): known bugs, measurements, headset test list and the V4 plan
 - [Architecture](docs/architecture.md)

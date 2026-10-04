@@ -562,6 +562,12 @@ export class ExperienceScene {
 
   private container: HTMLElement;
   private resizeObserver?: ResizeObserver;
+  private statsCanvas?: HTMLCanvasElement;
+  private statsTexture?: THREE.CanvasTexture;
+  private statsFrames = 0;
+  private statsLastUpdate = performance.now();
+  private readonly hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x4c5a6a, 0.15);
+  private readonly keyLight = new THREE.DirectionalLight(0xffffff, 0.15);
 
   constructor(private readonly options: SceneOptions) {
     this.container = options.container;
@@ -588,10 +594,9 @@ export class ExperienceScene {
     this.debugTexture = new THREE.CanvasTexture(this.debugCanvas);
     this.xrDebugPanel = this.createDebugPanel();
 
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x4c5a6a, 0.15));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 0.15);
-    keyLight.position.set(3, 5, 2);
-    this.scene.add(keyLight);
+    this.scene.add(this.hemisphereLight);
+    this.keyLight.position.set(3, 5, 2);
+    this.scene.add(this.keyLight);
     this.scene.add(this.classroomRoot);
     this.scene.add(this.userRig);
     this.userRig.add(this.camera);
@@ -615,6 +620,9 @@ export class ExperienceScene {
     this.scene.add(this.teleportArc, this.teleportTarget);
     this.scene.add(this.placementLaser, this.placementTarget, this.placementMenu);
     this.updateTeleportDebugPanel();
+    if (new URLSearchParams(window.location.search).has("stats")) {
+      this.createStatsPanel();
+    }
     void this.loadParticipantHeadsetTemplate();
 
 
@@ -681,6 +689,10 @@ export class ExperienceScene {
     this.tabletControlMode = experience.tabletControlMode ?? "explore";
     this.modelObjectLabel = this.getModelObjectLabel(experience);
     this.clearExperience();
+    const lighting = experience.environment?.lighting;
+    this.renderer.toneMappingExposure = lighting?.toneMappingExposure ?? SCENE_TONE_MAPPING_EXPOSURE;
+    this.hemisphereLight.intensity = lighting?.hemisphereIntensity ?? 0.15;
+    this.keyLight.intensity = lighting?.directionalIntensity ?? 0.15;
     this.scene.background = mode === "vr" ? new THREE.Color(0x182033) : null;
     this.loadSkybox(experience.environment?.skyboxUrl, loadVersion);
 
@@ -752,6 +764,14 @@ export class ExperienceScene {
     const session = await navigator.xr.requestSession(sessionMode, sessionInit);
     await this.renderer.xr.setSession(session);
     this.syncModeWithXrSession(mode);
+    if (this.environmentRoot) {
+      this.environmentRoot.visible = !(mode === "ar" && this.currentExperience?.environment?.hideInAr);
+    }
+    session.addEventListener("end", () => {
+      if (this.environmentRoot) {
+        this.environmentRoot.visible = true;
+      }
+    }, { once: true });
     this.xrPanelAnchored = false;
     requestAnimationFrame(() => this.anchorXrPanelInFrontOfUser());
   }
@@ -5871,7 +5891,60 @@ export class ExperienceScene {
     this.updatePlacementMenuFacing();
     this.maybeSyncParticipantPresence();
     this.renderer.render(this.scene, this.camera);
+    this.updateStatsPanel();
   };
+
+  // Performance meter for headset testing: open the app with ?stats=1. In XR, calls and triangles count both eyes.
+  private createStatsPanel(): void {
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 256;
+    const texture = new THREE.CanvasTexture(canvas);
+    const panel = new THREE.Mesh(
+      createFinitePlaneGeometry(0.4, 0.2),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false, toneMapped: false })
+    );
+    panel.position.set(-0.22, -0.2, -0.7);
+    panel.renderOrder = 100;
+    this.camera.add(panel);
+    this.statsCanvas = canvas;
+    this.statsTexture = texture;
+  }
+
+  private updateStatsPanel(): void {
+    if (!this.statsCanvas || !this.statsTexture) {
+      return;
+    }
+
+    this.statsFrames += 1;
+    const now = performance.now();
+    const elapsed = now - this.statsLastUpdate;
+    if (elapsed < 500) {
+      return;
+    }
+
+    const fps = (this.statsFrames * 1000) / elapsed;
+    this.statsFrames = 0;
+    this.statsLastUpdate = now;
+    const context = this.statsCanvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    const { render, memory } = this.renderer.info;
+    context.clearRect(0, 0, this.statsCanvas.width, this.statsCanvas.height);
+    context.fillStyle = "rgba(6, 16, 23, 0.85)";
+    context.fillRect(0, 0, this.statsCanvas.width, this.statsCanvas.height);
+    context.fillStyle = fps >= 68 ? "#4ade80" : fps >= 45 ? "#facc15" : "#f87171";
+    context.font = "700 72px Arial";
+    context.fillText(`${Math.round(fps)} fps`, 24, 84);
+    context.fillStyle = "#e2e8f0";
+    context.font = "600 36px Arial";
+    context.fillText(`calls ${render.calls}`, 24, 142);
+    context.fillText(`tris ${Math.round(render.triangles / 1000)}k`, 24, 190);
+    context.fillText(`tex ${memory.textures}  geo ${memory.geometries}`, 24, 238);
+    this.statsTexture.needsUpdate = true;
+  }
 
   private updateDesktopControls(delta: number): void {
     if (this.renderer.xr.isPresenting || !this.role) {
