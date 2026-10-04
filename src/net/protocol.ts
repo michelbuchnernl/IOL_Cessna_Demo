@@ -53,7 +53,7 @@ export interface VideoPrepState {
 }
 
 export const DEFAULT_CHROMA_KEY_SETTINGS: ChromaKeySettings = {
-  similarity: 0.36,
+  similarity: 0.6,
   smoothness: 0.08,
   spill: 0.45,
   opacity: 1,

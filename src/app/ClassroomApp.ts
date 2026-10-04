@@ -37,8 +37,9 @@ const SESSION_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_KEY_ROWS = ["QWERTYUP", "ASDFGHJKL", "ZXCVBNM", "23456789"];
 const NAME_KEY_ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
 const MAX_PARTICIPANT_NAME_LENGTH = 18;
-const CHROMA_SETTINGS_STORAGE_KEY = "iol-cessna-demo:chroma-key-settings:v1";
-const VIDEO_PREP_SETTINGS_STORAGE_KEY = "iol-cessna-demo:video-prep-settings:v1";
+// v2: older versions stored the former key threshold default (0.36), which left the green backdrop visible.
+const CHROMA_SETTINGS_STORAGE_KEY = "iol-cessna-demo:chroma-key-settings:v2";
+const VIDEO_PREP_SETTINGS_STORAGE_KEY = "iol-cessna-demo:video-prep-settings:v2";
 const APP_TITLE = "IOL Cessna Demo";
 const APP_TAGLINE = "Single-experience WebXR classroom";
 
@@ -84,6 +85,9 @@ export class ClassroomApp {
   private loadedSceneKey?: string;
   private readonly pendingTeacherCommands = new Set<ClientCommand>();
   private videoPrepBootstrapSessionCode?: string;
+  private rangeDragActive = false;
+  private renderPending = false;
+  private renderFrame?: number;
   private state: AppState = {
     screen: "select-experience",
     mode: "fallback",
@@ -102,7 +106,7 @@ export class ClassroomApp {
     partMarkerPositions: {},
     partMarkerStates: {},
     videoPrepStates: initialVideoPrepMemory,
-    modelTransformLocked: false
+    modelTransformLocked: true
   };
 
   constructor(
@@ -129,7 +133,7 @@ export class ClassroomApp {
       this.loadTeacherSharedScene();
       this.loadStudentMonitorScene();
       this.bootstrapTeacherVideoPrepState();
-      this.render();
+      this.requestRender();
     });
     this.socket.addEventListener("teacher-command", (event) => {
       const command = (event as CustomEvent<ClientCommand>).detail;
@@ -141,7 +145,49 @@ export class ClassroomApp {
       const detail = (event as CustomEvent<{ participants: ClassroomSocketState["participants"] }>).detail;
       this.scene?.setParticipants(detail.participants, this.state.socket.participantId);
     });
+    this.installRangeDragGuard();
     this.render();
+  }
+
+  // render() replaces the whole markup. Sync updates arrive many times per second, so they are coalesced to one render
+  // per frame, and held back while a slider is being dragged (a replaced slider drops the drag after one step).
+  private requestRender(): void {
+    if (this.rangeDragActive) {
+      this.renderPending = true;
+      return;
+    }
+    if (this.renderFrame !== undefined) {
+      return;
+    }
+    this.renderFrame = requestAnimationFrame(() => {
+      this.renderFrame = undefined;
+      if (this.rangeDragActive) {
+        this.renderPending = true;
+        return;
+      }
+      this.render();
+    });
+  }
+
+  private installRangeDragGuard(): void {
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement && target.type === "range") {
+        this.rangeDragActive = true;
+      }
+    }, true);
+    const release = () => {
+      if (!this.rangeDragActive) {
+        return;
+      }
+      this.rangeDragActive = false;
+      if (this.renderPending) {
+        this.renderPending = false;
+        this.requestRender();
+      }
+    };
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", release, true);
   }
 
   private render(): void {
@@ -1143,6 +1189,7 @@ export class ClassroomApp {
     } else if (!container.contains(this.scene.domElement)) {
       container.append(this.scene.domElement);
     }
+    this.scene.setContainer(container);
     this.scene.refreshViewport();
     this.scene.setModelTransformLocked(this.state.modelTransformLocked);
     this.scene.setLocalParticipantId(this.state.socket.participantId);
@@ -1283,7 +1330,7 @@ export class ClassroomApp {
       partMarkerPositions: {},
       partMarkerStates: {},
       videoPrepStates: initialVideoPrepMemory,
-      modelTransformLocked: false
+      modelTransformLocked: true
     };
     this.loadedSceneKey = undefined;
     this.videoPrepBootstrapSessionCode = undefined;

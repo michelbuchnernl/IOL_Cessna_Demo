@@ -268,11 +268,12 @@ const DESKTOP_DISTANCE_DRAG_SPEED = 0.015;
 const DESKTOP_WHEEL_DISTANCE_SPEED = 0.0025;
 const DESKTOP_MIN_OBJECT_DISTANCE = 0.35;
 const DESKTOP_MAX_OBJECT_DISTANCE = 14;
-const CHROMA_DANCER_VIDEO_URL = "/assets/chroma/cessna-green-screen.mp4";
+const CHROMA_DANCER_VIDEO_URL = "/assets/chroma/turbine-mechanic-green-screen.mp4";
 const PARTICIPANT_HEADSET_ASSET_URL = "/assets/avatars/vr-hmd/vr-hmd.glb";
 const PARTICIPANT_HEADSET_TARGET_SIZE = 0.42;
 const SCENE_TONE_MAPPING_EXPOSURE = 0.145;
-const XR_FRAMEBUFFER_SCALE_FACTOR = 1.12;
+const XR_FRAMEBUFFER_SCALE_FACTOR = 1;
+const MAX_PIXEL_RATIO = 1.5;
 const XR_FOVEATION = 0.45;
 const TEXTURE_ANISOTROPY_LIMIT = 8;
 const MATERIAL_TEXTURE_KEYS = [
@@ -317,8 +318,8 @@ const REMOTE_PARTICIPANT_SPAWN_CONTROLLER_SIDE = 0.28;
 const REMOTE_PARTICIPANT_MAX_HAND_OFFSET = 0.9;
 const REMOTE_PARTICIPANT_LABEL_OFFSET = 0.5;
 const KEYED_PERSON_TARGET_HEIGHT_METERS = 1.85;
-const KEYED_VIDEO_SOURCE_WIDTH = 716;
-const KEYED_VIDEO_SOURCE_HEIGHT = 1284;
+const KEYED_VIDEO_SOURCE_WIDTH = 540;
+const KEYED_VIDEO_SOURCE_HEIGHT = 960;
 const PORTRAIT_VIDEO_HEIGHT = KEYED_PERSON_TARGET_HEIGHT_METERS;
 const PORTRAIT_VIDEO_WIDTH = PORTRAIT_VIDEO_HEIGHT * (KEYED_VIDEO_SOURCE_WIDTH / KEYED_VIDEO_SOURCE_HEIGHT);
 const PART_VIDEO_DEFAULT_HEIGHT = 1.6;
@@ -512,6 +513,10 @@ export class ExperienceScene {
   private readonly tabletJoystickTarget = new THREE.Vector2();
   private readonly tabletJoystickCurrent = new THREE.Vector2();
   private desktopGrabDistance = 1.6;
+  private readonly desktopGrabOffset = new THREE.Vector3();
+  private readonly grabbedModelOffset = new THREE.Vector3();
+  private readonly grabbedChromaOffset = new THREE.Vector3();
+  private readonly grabbedMarkerOffset = new THREE.Vector3();
   private desktopYaw = 0;
   private desktopPitch = 0;
   private grabbedModelDistance = 1.6;
@@ -555,7 +560,15 @@ export class ExperienceScene {
     lastAttemptReason: "idle"
   };
 
+  private container: HTMLElement;
+  private resizeObserver?: ResizeObserver;
+
   constructor(private readonly options: SceneOptions) {
+    this.container = options.container;
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => this.resize());
+      this.resizeObserver.observe(this.container);
+    }
     this.dracoLoader.setDecoderPath("/libs/draco/gltf/");
     this.loader.setDRACOLoader(this.dracoLoader);
 
@@ -567,7 +580,7 @@ export class ExperienceScene {
     this.renderer.xr.enabled = true;
     this.renderer.xr.setFramebufferScaleFactor(XR_FRAMEBUFFER_SCALE_FACTOR);
     this.renderer.xr.setFoveation(XR_FOVEATION);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     options.container.append(this.renderer.domElement);
     this.refreshViewport();
     this.debugCanvas.width = 512;
@@ -679,6 +692,7 @@ export class ExperienceScene {
             return;
           }
           this.environmentRoot = gltf.scene;
+          this.removeZeroScaleNodes(gltf.scene);
           this.applyEnvironmentTransform(gltf.scene, experience.environment);
           this.applyEnvironmentBrightness(gltf.scene, experience.environment?.brightness ?? 1);
           this.applyTextureQuality(gltf.scene);
@@ -737,8 +751,24 @@ export class ExperienceScene {
           };
     const session = await navigator.xr.requestSession(sessionMode, sessionInit);
     await this.renderer.xr.setSession(session);
+    this.syncModeWithXrSession(mode);
     this.xrPanelAnchored = false;
     requestAnimationFrame(() => this.anchorXrPanelInFrontOfUser());
+  }
+
+  // A Quest reports AR support, so the teacher scene is loaded as "ar" even when the teacher enters VR.
+  // Teleport and snap turn only run in "vr", so the scene mode must follow the session that was actually started.
+  private syncModeWithXrSession(mode: Exclude<ExperienceMode, "fallback">): void {
+    if (this.mode === mode) {
+      return;
+    }
+    this.mode = mode;
+    if (mode === "vr" && !this.environmentSkyboxTexture) {
+      this.scene.background = new THREE.Color(0x182033);
+    } else if (mode === "ar") {
+      this.scene.background = null;
+    }
+    this.buildXrControlPanel();
   }
 
   setRole(role?: Role): void {
@@ -802,9 +832,19 @@ export class ExperienceScene {
 
   calibrateOrigin(): number[] {
     if (this.renderer.xr.isPresenting) {
+      // Use only the floor position and the heading. Taking the full head pose would lift every object
+      // by head height and tilt it with the head, because the hangar itself is not part of classroomRoot.
       const xrCamera = this.renderer.xr.getCamera();
       xrCamera.updateMatrixWorld();
-      this.localOrigin.copy(xrCamera.matrixWorld);
+      const headPosition = new THREE.Vector3();
+      const headQuaternion = new THREE.Quaternion();
+      xrCamera.matrixWorld.decompose(headPosition, headQuaternion, new THREE.Vector3());
+      const heading = new THREE.Euler().setFromQuaternion(headQuaternion, "YXZ").y;
+      this.localOrigin.compose(
+        new THREE.Vector3(headPosition.x, 0, headPosition.z),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading),
+        new THREE.Vector3(1, 1, 1)
+      );
     } else {
       this.localOrigin.identity();
     }
@@ -1355,6 +1395,7 @@ export class ExperienceScene {
     this.hideChromaBillboard();
     this.removeChromaMarker();
     window.removeEventListener("resize", this.resize);
+    this.resizeObserver?.disconnect();
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     this.renderer.domElement.removeEventListener("pointerdown", this.handlePointerDown);
@@ -2185,6 +2226,19 @@ export class ExperienceScene {
     return `${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}`;
   }
 
+  // hangar.glb contains a copy of the turbofan at scale 0: invisible, but still ~97k triangles and 3 draw calls per frame.
+  private removeZeroScaleNodes(root: THREE.Object3D): void {
+    const collapsed: THREE.Object3D[] = [];
+    root.traverse((object) => {
+      if (object !== root && (Math.abs(object.scale.x) < 1e-6 || Math.abs(object.scale.y) < 1e-6 || Math.abs(object.scale.z) < 1e-6)) {
+        collapsed.push(object);
+      }
+    });
+    for (const object of collapsed) {
+      object.removeFromParent();
+    }
+  }
+
   private async loadModel(experience: ExperienceConfig, loadVersion: number): Promise<void> {
     return new Promise((resolve) => {
       this.loader.load(
@@ -2722,7 +2776,9 @@ export class ExperienceScene {
     const teacherPreviewOnly = this.role === "teacher" && activationMode === "student";
     const prepState = this.getVideoPrepStateForPart(part);
     const canShowSelectedVideo = prepState.markerState !== "red" && (this.role === "teacher" || prepState.markerState === "green");
-    if (!teacherPreviewOnly && canShowSelectedVideo && (activationMode === "student" || activationMode === "teacher") && part.videoUrl) {
+    // Teacher-controlled videos are started by the teacher's command. A student tapping the marker must not start one locally.
+    const mayStartVideo = activationMode === "student" || (activationMode === "teacher" && this.role === "teacher");
+    if (!teacherPreviewOnly && canShowSelectedVideo && mayStartVideo && part.videoUrl) {
       this.showPartVideoBillboard(part, true, {
         autoPlay: this.role !== "teacher",
         muted: this.role === "teacher"
@@ -2895,13 +2951,27 @@ export class ExperienceScene {
     }
   }
 
+  // three.js raycasts ignore `visible`, so hidden markers and a hidden turbine would still be clickable.
+  private intersectVisible(objects: THREE.Object3D[], recursive = false): THREE.Intersection[] {
+    return this.raycaster.intersectObjects(objects, recursive).filter((hit) => this.isObjectVisibleInScene(hit.object));
+  }
+
+  private isObjectVisibleInScene(object: THREE.Object3D): boolean {
+    for (let current: THREE.Object3D | null = object; current; current = current.parent) {
+      if (!current.visible) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private getPreviewHitFromCurrentRay(): THREE.Intersection | undefined {
     const previews = Array.from(this.partVideoPreviews.values(), (preview) => preview.mesh).filter((mesh) => mesh.visible);
     return previews.length > 0 ? this.raycaster.intersectObjects(previews, false)[0] : undefined;
   }
 
   private getPartFromCurrentRay(): ExperiencePartConfig | undefined {
-    const markerHits = this.raycaster.intersectObjects([...this.markers.keys()], false);
+    const markerHits = this.intersectVisible([...this.markers.keys()], false);
     if (markerHits[0]) {
       return this.markers.get(markerHits[0].object);
     }
@@ -2911,7 +2981,7 @@ export class ExperienceScene {
   }
 
   private getPartIdFromCurrentRay(): string | undefined {
-    const markerHits = this.raycaster.intersectObjects([...this.markersByPartId.values()], false);
+    const markerHits = this.intersectVisible([...this.markersByPartId.values()], false);
     if (markerHits[0]) {
       const hitMesh = markerHits[0].object as THREE.Mesh;
       for (const [partId, mesh] of this.markersByPartId) {
@@ -4125,6 +4195,9 @@ export class ExperienceScene {
       DESKTOP_MAX_OBJECT_DISTANCE,
       Math.max(DESKTOP_MIN_OBJECT_DISTANCE, cameraWorldPosition.distanceTo(hitPoint))
     );
+    // Keep the gap between the clicked point and the object's origin so the object does not jump to the cursor.
+    const grabbed = target === "chroma" ? this.chromaBillboard : this.modelRoot;
+    this.desktopGrabOffset.copy(grabbed ? grabbed.getWorldPosition(new THREE.Vector3()).sub(hitPoint) : new THREE.Vector3());
     this.renderer.domElement.setPointerCapture(pointerId);
   }
 
@@ -4222,7 +4295,7 @@ export class ExperienceScene {
         return;
       }
 
-      const modelHit = this.modelRoot ? this.raycaster.intersectObject(this.modelRoot, true)[0] : undefined;
+      const modelHit = this.modelRoot ? this.intersectVisible([this.modelRoot], true)[0] : undefined;
       if (modelHit && !this.modelTransformLocked) {
         this.startDesktopDistanceGrab("model", modelHit.point, event.pointerId);
         event.preventDefault();
@@ -4240,10 +4313,9 @@ export class ExperienceScene {
         const marker = this.markersByPartId.get(partId);
         const markerWorldPosition = marker?.getWorldPosition(new THREE.Vector3());
         const previewHit = this.getPreviewHitFromCurrentRay();
-        this.desktopGrabDistance = Math.max(
-          0.5,
-          Math.min(10, this.raycaster.ray.origin.distanceTo(previewHit?.point ?? markerWorldPosition ?? this.raycaster.ray.origin))
-        );
+        const markerGrabPoint = previewHit?.point ?? markerWorldPosition ?? this.raycaster.ray.origin;
+        this.desktopGrabDistance = Math.max(0.5, Math.min(10, this.raycaster.ray.origin.distanceTo(markerGrabPoint)));
+        this.desktopGrabOffset.copy(markerWorldPosition ? markerWorldPosition.clone().sub(markerGrabPoint) : new THREE.Vector3());
         this.desktopGrabPointerId = event.pointerId;
         this.renderer.domElement.setPointerCapture(event.pointerId);
         event.preventDefault();
@@ -4258,7 +4330,7 @@ export class ExperienceScene {
       }
 
       if (this.modelRoot && !this.modelTransformLocked) {
-        const hit = this.raycaster.intersectObject(this.modelRoot, true)[0];
+        const hit = this.intersectVisible([this.modelRoot], true)[0];
         if (hit) {
           this.startDesktopObjectGrab("model", hit.point, event.pointerId);
           event.preventDefault();
@@ -4307,7 +4379,10 @@ export class ExperienceScene {
           Math.max(DESKTOP_MIN_OBJECT_DISTANCE, this.desktopGrabDistance - event.movementY * DESKTOP_DISTANCE_DRAG_SPEED)
         );
       }
-      const target = this.raycaster.ray.origin.clone().addScaledVector(this.raycaster.ray.direction, this.desktopGrabDistance);
+      const target = this.raycaster.ray.origin
+        .clone()
+        .addScaledVector(this.raycaster.ray.direction, this.desktopGrabDistance)
+        .add(this.desktopGrabOffset);
       if (this.desktopGrabTarget === "chroma" && this.chromaBillboard) {
         this.chromaBillboard.position.copy(this.classroomRoot.worldToLocal(target));
         this.emitChromaTransformChange();
@@ -4387,41 +4462,28 @@ export class ExperienceScene {
       return;
     }
 
+    // A plain wheel or touchpad scroll must never move anything. Depth changes need Shift.
+    if (!event.shiftKey) {
+      return;
+    }
+
     const bounds = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
     this.pointer.y = -(((event.clientY - bounds.top) / bounds.height) * 2 - 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
+    event.preventDefault();
+    event.stopPropagation();
 
-    const selectedMarker = this.selectedPartMarkerId ? this.markersByPartId.get(this.selectedPartMarkerId) : undefined;
-    if (this.selectedPartMarkerId && selectedMarker) {
-      this.moveObjectAlongPointerRay(selectedMarker, event.deltaY);
-      this.positionPartVideoPreview(this.selectedPartMarkerId, selectedMarker);
-      if (this.selectedPartMarkerId === this.activePartVideoPartId) {
-        this.positionPartVideoBillboard(selectedMarker);
+    const partId = this.selectedPartMarkerId ?? this.getPartIdFromCurrentRay();
+    const marker = partId ? this.markersByPartId.get(partId) : undefined;
+    if (partId && marker) {
+      this.selectedPartMarkerId = partId;
+      this.moveObjectAlongPointerRay(marker, event.deltaY);
+      this.positionPartVideoPreview(partId, marker);
+      if (partId === this.activePartVideoPartId) {
+        this.positionPartVideoBillboard(marker);
       }
-      this.emitPartMarkerPositionChange(this.selectedPartMarkerId, true);
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-
-    if (event.shiftKey) {
-      const partId = this.selectedPartMarkerId ?? this.getPartIdFromCurrentRay();
-      const marker = partId ? this.markersByPartId.get(partId) : undefined;
-      if (partId && marker) {
-        this.selectedPartMarkerId = partId;
-        this.moveObjectAlongPointerRay(marker, event.deltaY);
-        this.positionPartVideoPreview(partId, marker);
-        if (partId === this.activePartVideoPartId) {
-          this.positionPartVideoBillboard(marker);
-        }
-        this.emitPartMarkerPositionChange(partId, true);
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
+      this.emitPartMarkerPositionChange(partId, true);
       return;
     }
 
@@ -4429,23 +4491,14 @@ export class ExperienceScene {
     if (chromaHit && this.chromaBillboard) {
       this.moveObjectAlongPointerRay(this.chromaBillboard, event.deltaY);
       this.emitChromaTransformChange(true);
-      event.preventDefault();
-      event.stopPropagation();
       return;
     }
 
-    const modelHit = this.modelRoot ? this.raycaster.intersectObject(this.modelRoot, true)[0] : undefined;
-    if ((modelHit || this.modelRoot) && this.modelRoot && !this.modelTransformLocked) {
+    // The turbine only moves when the pointer is actually on it and it is unlocked.
+    const modelHit = this.modelRoot ? this.intersectVisible([this.modelRoot], true)[0] : undefined;
+    if (modelHit && this.modelRoot && !this.modelTransformLocked) {
       this.moveObjectAlongPointerRay(this.modelRoot, event.deltaY);
       this.emitModelPositionChange(true);
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-
-    if (modelHit && this.modelTransformLocked) {
-      event.preventDefault();
-      event.stopPropagation();
     }
   };
 
@@ -4457,7 +4510,13 @@ export class ExperienceScene {
       DESKTOP_MAX_OBJECT_DISTANCE,
       Math.max(DESKTOP_MIN_OBJECT_DISTANCE, currentDistance + wheelDelta * DESKTOP_WHEEL_DISTANCE_SPEED)
     );
-    const nextWorldPosition = this.raycaster.ray.origin.clone().addScaledVector(this.raycaster.ray.direction, nextDistance);
+    // Move along the line from the camera to the object itself, not along the cursor ray: the object's origin
+    // is rarely under the cursor, so using the cursor ray makes it jump sideways and up.
+    const towardObject = objectWorldPosition.clone().sub(this.raycaster.ray.origin);
+    if (towardObject.lengthSq() < 1e-6) {
+      return;
+    }
+    const nextWorldPosition = this.raycaster.ray.origin.clone().addScaledVector(towardObject.normalize(), nextDistance);
     object.position.copy(this.classroomRoot.worldToLocal(nextWorldPosition));
   }
 
@@ -4701,7 +4760,7 @@ export class ExperienceScene {
     if (this.selectChromaMarkerFromCurrentRay()) {
       return;
     }
-    const hits = this.raycaster.intersectObjects([...this.markers.keys()], false);
+    const hits = this.intersectVisible([...this.markers.keys()], false);
     const part = hits[0] ? this.markers.get(hits[0].object) : undefined;
     if (part) {
       this.handlePartMarkerSelected(part);
@@ -5047,6 +5106,7 @@ export class ExperienceScene {
           const controllerPosition = new THREE.Vector3();
           controller.getWorldPosition(controllerPosition);
           this.grabbedMarkerDistance = Math.max(0.35, Math.min(8, controllerPosition.distanceTo(markerHitsXr[0].point)));
+          this.grabbedMarkerOffset.copy(mesh.getWorldPosition(new THREE.Vector3()).sub(markerHitsXr[0].point));
           this.updateGrabbedMarkerPosition();
           return;
         }
@@ -5060,6 +5120,7 @@ export class ExperienceScene {
       const controllerPosition = new THREE.Vector3();
       controller.getWorldPosition(controllerPosition);
       this.grabbedChromaDistance = Math.max(0.35, Math.min(8, controllerPosition.distanceTo(chromaHit.point)));
+      this.grabbedChromaOffset.copy(chromaHit.object.getWorldPosition(new THREE.Vector3()).sub(chromaHit.point));
       this.updateGrabbedChromaPosition();
       return;
     }
@@ -5075,6 +5136,7 @@ export class ExperienceScene {
       const controllerPosition = new THREE.Vector3();
       controller.getWorldPosition(controllerPosition);
       this.grabbedModelDistance = Math.max(0.35, Math.min(8, controllerPosition.distanceTo(hit.point)));
+      this.grabbedModelOffset.copy(this.modelRoot.getWorldPosition(new THREE.Vector3()).sub(hit.point));
       this.updateGrabbedModelPosition();
       return;
     }
@@ -5152,7 +5214,7 @@ export class ExperienceScene {
     origin.setFromMatrixPosition(controller.matrixWorld);
     direction.applyQuaternion(controller.getWorldQuaternion(new THREE.Quaternion())).normalize();
     this.raycaster.set(origin, direction);
-    return this.raycaster.intersectObjects(objects, recursive);
+    return this.intersectVisible(objects, recursive);
   }
 
   private selectModelStateMarkerFromCurrentRay(): boolean {
@@ -5249,7 +5311,7 @@ export class ExperienceScene {
       const distanceAxis = axes.y;
       if (this.objectRotationActive) {
         this.rotateGrabbedModel(scaleAxis, distanceAxis);
-        this.modelRoot.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedModelDistance)));
+        this.modelRoot.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedModelDistance).add(this.grabbedModelOffset)));
         this.emitModelPositionChange();
         return;
       }
@@ -5267,7 +5329,7 @@ export class ExperienceScene {
       }
     }
 
-    this.modelRoot.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedModelDistance)));
+    this.modelRoot.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedModelDistance).add(this.grabbedModelOffset)));
     this.emitModelPositionChange();
   }
 
@@ -5284,7 +5346,7 @@ export class ExperienceScene {
       .applyQuaternion(this.grabbedChromaController.getWorldQuaternion(new THREE.Quaternion()))
       .normalize();
 
-    this.chromaBillboard.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedChromaDistance)));
+    this.chromaBillboard.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedChromaDistance).add(this.grabbedChromaOffset)));
     this.emitChromaTransformChange();
   }
 
@@ -5301,7 +5363,7 @@ export class ExperienceScene {
     this.grabbedMarkerController.updateMatrixWorld();
     origin.setFromMatrixPosition(this.grabbedMarkerController.matrixWorld);
     direction.applyQuaternion(this.grabbedMarkerController.getWorldQuaternion(new THREE.Quaternion())).normalize();
-    marker.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedMarkerDistance)));
+    marker.position.copy(this.classroomRoot.worldToLocal(origin.addScaledVector(direction, this.grabbedMarkerDistance).add(this.grabbedMarkerOffset)));
     this.emitPartMarkerPositionChange(this.grabbedMarkerPartId);
   }
 
@@ -5739,16 +5801,29 @@ export class ExperienceScene {
     }
   }
 
+  // The app rebuilds its markup on state changes, so the canvas is re-parented into a new container.
+  // Measure and observe whichever container currently holds the canvas, not the first one.
+  setContainer(container: HTMLElement): void {
+    if (this.container === container) {
+      return;
+    }
+    this.container = container;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver?.observe(container);
+    this.refreshViewport();
+  }
+
   private resize = (): void => {
-    const bounds = this.options.container.getBoundingClientRect();
-    const width = Math.floor(bounds.width || this.options.container.clientWidth);
-    const height = Math.floor(bounds.height || this.options.container.clientHeight);
+    const bounds = this.container.getBoundingClientRect();
+    const width = Math.floor(bounds.width || this.container.clientWidth);
+    const height = Math.floor(bounds.height || this.container.clientHeight);
     if (width < 2 || height < 2) {
       return;
     }
 
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     this.renderer.setSize(width, height, false);
   };
 
@@ -5783,7 +5858,6 @@ export class ExperienceScene {
     this.updateGrabbedModelPosition();
     this.updateGrabbedChromaPosition();
     this.updateGrabbedMarkerPosition();
-    this.updateTeleportDebugPanel();
     if (this.renderer.xr.isPresenting && this.role && this.xrMenuVisible && !this.xrPanelAnchored) {
       this.anchorXrPanelInFrontOfUser();
     }

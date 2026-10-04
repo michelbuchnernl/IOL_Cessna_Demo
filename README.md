@@ -72,6 +72,8 @@ Select a video marker as Teacher to open the Green Screen Video panel.
 
 For desktop prep, `Ctrl` + drag moves a video marker/preview, and `Shift` + mouse wheel adjusts its depth from the camera.
 
+The turbofan starts locked. Press `Unlock Turbofan` to move it with `Ctrl` + drag, or `Shift` + wheel while the pointer is on it. A plain scroll never moves anything. While it is locked, the Size slider is disabled.
+
 ## Assets
 
 Project assets are wired to:
